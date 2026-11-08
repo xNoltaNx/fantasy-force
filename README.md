@@ -5,7 +5,10 @@ The website of Fantasy Force, a Horde guild in World of Warcraft: Forever: who's
 ## Pages
 
 - **Roster:** everyone, with their main and alts, level, rank, professions and local time. Search and filter by class, role or rank.
-- **Professions:** who has each profession, highest skill first: where to find a crafter.
+- **Raids** (members): attendance over the last 4, 8 or all raids, and each raid's bosses and loot, from the addon. Pick a member to see their loot.
+- **Professions:** a page per profession with every recipe the guild knows, searchable, and who knows it; crafters by skill. Items and recipes show their game icon and Wowhead tooltip on hover.
+- **Guild bank** (members): the guild bank or bank alt's bags and bank, searchable by tab, with gold.
+- **Links:** the Discord invite and handy guides, guild rules and loot policy; officers edit them in place.
 - **Events:** raids and other events. Members sign up with a character and a role (Going, Maybe or Can't make it), and each event shows tanks, healers and DPS against what's needed.
 - **Availability:** each member paints the hours they usually play. The guild heat map and the best three-hour raid times show in each viewer's own time zone.
 - **Class balance:** tanks, healers and DPS among mains, how many players can fill each role on any character, and every class's mains and alts.

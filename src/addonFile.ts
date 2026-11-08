@@ -1,6 +1,7 @@
 // Reads the Fantasy Force addon's saved file (WTF\Account\<ACCOUNT>\SavedVariables\FantasyForce.lua).
 // It's a Lua table, read here as data only: a small parser that understands tables, strings, numbers,
 // booleans and nil, and refuses anything else, so no file can run code on the site.
+import type { GuildBank, Raid, Recipe } from './types'
 import { CLASSES, roleFor, type Role } from './wow'
 
 type Lua = string | number | boolean | null | Lua[] | { [k: string]: Lua }
@@ -96,7 +97,7 @@ export interface ImportedCharacter {
   race: string
   spec: string
   role: Role
-  professions: { name: string; skill: number; max: number; recipes?: string[] }[]
+  professions: { name: string; skill: number; max: number; recipes?: Recipe[] }[]
   inGuild: boolean
   guild: string
 }
@@ -115,6 +116,41 @@ export interface ImportedGuildMember {
 export interface AddonFile {
   characters: ImportedCharacter[]
   guild: { name: string; updated: number; by: string; members: ImportedGuildMember[] } | null
+  bank: GuildBank | null
+  raids: Raid[]
+}
+
+const iso = (secs: number | null): string => new Date((secs ?? 0) * 1000).toISOString()
+const names = (v: Lua | undefined): string[] => list(v).map((x) => text(x)).filter(Boolean)
+
+function readBank(b: Record<string, Lua>): GuildBank | null {
+  if (!Array.isArray(b.tabs) && !(b.tabs && typeof b.tabs === 'object')) return null
+  return {
+    source: text(b.source) === 'guild' ? 'guild' : 'alt',
+    updated_at: iso(num(b.updated)),
+    recorded_by: text(b.by),
+    money: num(b.money),
+    tabs: list(b.tabs).map((t) => rec(t)).map((t) => ({
+      name: text(t.name),
+      items: list(t.items).map((i) => rec(i)).filter((i) => text(i.name))
+        .map((i) => ({ id: num(i.id) ?? 0, name: text(i.name), count: num(i.count) ?? 1, quality: num(i.quality) ?? 1 })),
+    })),
+  }
+}
+
+function readRaid(r: Record<string, Lua>): Raid {
+  return {
+    key: text(r.key) || `${text(r.zone)} ${iso(num(r.started)).slice(0, 10)}`,
+    zone: text(r.zone),
+    started_at: iso(num(r.started)),
+    ended_at: iso(num(r.ended) ?? num(r.started)),
+    recorded_by: text(r.by),
+    attendees: names(r.attendees),
+    bosses: list(r.bosses).map((x) => rec(x)).map((x) => ({ name: text(x.name), killed_at: iso(num(x.killed)), attendees: names(x.attendees) })),
+    loot: list(r.loot).map((x) => rec(x)).filter((x) => text(x.name)).map((x) => ({
+      item_id: num(x.id) ?? 0, name: text(x.name), quality: num(x.quality) ?? 4, to: text(x.to), at: iso(num(x.at)), boss: text(x.boss),
+    })),
+  }
 }
 
 const RACE_FILES: Record<string, string> = { scourge: 'undead', undead: 'undead', nightelf: 'nightelf' }
@@ -146,11 +182,20 @@ const rec = (v: Lua | undefined): Record<string, Lua> => (v && typeof v === 'obj
 function withRecipes(profs: ImportedCharacter['professions'], recipes: Record<string, Lua>): ImportedCharacter['professions'] {
   const out = profs.map((p) => ({ ...p }))
   for (const [name, raw] of Object.entries(recipes)) {
-    const names = [...new Set(list(raw).map((r) => (typeof r === 'string' ? r : text(rec(r).name))).filter(Boolean))].sort()
-    if (!names.length) continue
+    const byName = new Map<string, Recipe>()
+    for (const r of list(raw)) {
+      const x = typeof r === 'string' ? { name: r } : rec(r)
+      const n = typeof r === 'string' ? r : text((x as Record<string, Lua>).name)
+      if (!n || byName.has(n)) continue
+      const spell = typeof r === 'string' ? null : num((x as Record<string, Lua>).id)
+      const item = typeof r === 'string' ? null : num((x as Record<string, Lua>).item)
+      byName.set(n, { name: n, ...(spell ? { spell } : {}), ...(item ? { item } : {}) })
+    }
+    const found = [...byName.values()].sort((a, b) => a.name.localeCompare(b.name))
+    if (!found.length) continue
     const p = out.find((x) => x.name.toLowerCase() === name.toLowerCase())
-    if (p) p.recipes = names
-    else out.push({ name, skill: 0, max: 0, recipes: names })
+    if (p) p.recipes = found
+    else out.push({ name, skill: 0, max: 0, recipes: found })
   }
   return out
 }
@@ -201,5 +246,7 @@ export function readAddonFile(src: string): AddonFile {
     }).filter((x) => x.name),
   } : null
 
-  return { characters, guild }
+  const bank = db.bank ? readBank(rec(db.bank)) : null
+  const raids = list(db.raids).map((r) => readRaid(rec(r))).filter((r) => r.zone)
+  return { characters, guild, bank, raids }
 }

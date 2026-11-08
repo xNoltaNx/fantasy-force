@@ -1,4 +1,4 @@
-import type { Character, GuildData, Member } from './types'
+import type { Character, GuildData, Member, Profession } from './types'
 import { classById, MAX_LEVEL, raceName, ROLES, type Role } from './wow'
 
 export function RoleIcon({ role }: { role: Role }) {
@@ -25,6 +25,18 @@ export function CharLine({ c, race = false }: { c: Character; race?: boolean }) 
 export function Avatar({ m, size = 32 }: { m: Member; size?: number }) {
   if (m.avatar_url) return <img className="avatar" src={m.avatar_url} width={size} height={size} alt="" />
   return <span className="avatar avatar-letter" style={{ width: size, height: size }}>{m.display_name.slice(0, 1).toUpperCase()}</span>
+}
+
+/** What hovering a character shows: who plays it, level, race, spec and class, and its professions (one in focus first). */
+export function charSummary(data: GuildData, c: Character, focus?: Profession): string {
+  const cls = classById(c.class_id)?.name ?? ''
+  const profs = [...(focus ? [focus] : []), ...c.professions.filter((p) => p.name !== focus?.name)]
+    .map((p) => `${p.name} ${p.skill}${p.recipes?.length ? ` (${p.recipes.length} recipes)` : ''}`)
+  return [
+    `${c.name}, played by ${memberName(data, c.member_id)}`,
+    [c.level ? `Level ${c.level}` : '', raceName(c.race), c.spec, cls].filter(Boolean).join(' '),
+    ...profs,
+  ].join('\n')
 }
 
 export function charsOf(data: GuildData, memberId: string): Character[] {

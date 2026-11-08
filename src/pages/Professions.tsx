@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { useApp } from '../app'
-import { memberName } from '../bits'
-import type { Character, Profession } from '../types'
+import { charSummary, memberName } from '../bits'
+import type { Character, Profession, Recipe } from '../types'
+import { GameLink } from '../wowhead'
 import { classById, PROFESSIONS } from '../wow'
 
 type Known = { c: Character; p: Profession }
@@ -26,13 +27,15 @@ export function Professions({ pick }: { pick?: string }) {
   const current = pick ? groups.find((g) => g.name.toLowerCase() === decodeURIComponent(pick).toLowerCase()) : undefined
 
   // Every recipe known in the guild (in the picked profession, or all), with who knows it.
-  const recipes = new Map<string, Known[]>()
+  const recipes = new Map<string, { recipe: Recipe; who: Known[] }>()
   for (const g of current ? [current] : groups) for (const k of g.people) for (const r of k.p.recipes ?? []) {
-    recipes.set(r, [...(recipes.get(r) ?? []), k])
+    const had = recipes.get(r.name)
+    recipes.set(r.name, { recipe: { ...had?.recipe, ...r }, who: [...(had?.who ?? []), k] })
   }
   const needle = q.trim().toLowerCase()
   const showList = !!current || needle.length >= 2
   const found = [...recipes.entries()].filter(([r]) => !needle || r.toLowerCase().includes(needle)).sort((a, b) => a[0].localeCompare(b[0]))
+    .map(([, v]) => v)
   const anyRecipes = recipes.size > 0
 
   return (
@@ -56,12 +59,12 @@ export function Professions({ pick }: { pick?: string }) {
         <div className="card recipe-results">
           <h2>{current ? `${current.name} recipes` : 'Recipes'} <span className="muted small">{found.length}{needle ? ` of ${recipes.size}` : ''}</span></h2>
           {found.length === 0 && <p className="muted">{anyRecipes ? `No recipe matching "${q.trim()}".` : 'No recipes yet: they arrive when members open their profession windows with the addon on.'}</p>}
-          {found.map(([recipe, who]) => (
-            <div className="recipe-row" key={recipe}>
-              <b>{recipe}</b>
+          {found.map(({ recipe, who }) => (
+            <div className="recipe-row" key={recipe.name}>
+              <b><GameLink name={recipe.name} item={recipe.item} spell={recipe.spell} /></b>
               <span className="recipe-who">
                 {who.map(({ c, p }) => (
-                  <span key={c.id} className="alt-chip" title={`${p.name} ${p.skill}`}>
+                  <span key={c.id} className="alt-chip" title={charSummary(data, c, p)}>
                     <i style={{ background: classById(c.class_id)?.color }} />{c.name}<span className="muted"> {memberName(data, c.member_id)}</span>
                   </span>
                 ))}
@@ -86,7 +89,7 @@ export function Professions({ pick }: { pick?: string }) {
 /** A profession's crafters, highest skill first; a row opens that person's recipes. */
 function Crafters({ g, open, setOpen, link = false }: { g: { name: string; people: Known[] }; open: string | null; setOpen: (k: string | null) => void; link?: boolean }) {
   const { data } = useApp()
-  const count = new Set(g.people.flatMap(({ p }) => p.recipes ?? [])).size
+  const count = new Set(g.people.flatMap(({ p }) => (p.recipes ?? []).map((r) => r.name))).size
   return (
     <div className="card prof-card">
       <h2>
@@ -100,7 +103,7 @@ function Crafters({ g, open, setOpen, link = false }: { g: { name: string; peopl
           return (
             <li key={key}>
               <button className="prof-row" disabled={!n} aria-expanded={open === key} onClick={() => setOpen(open === key ? null : key)}
-                title={`${c.name} (${memberName(data, c.member_id)}): ${p.skill} of ${p.max || 300}${n ? `, ${n} recipes` : ''}`}>
+                title={`${charSummary(data, c, p)}${n ? `\nClick to see the ${n} recipes` : ''}`}>
                 <span className="prof-who">
                   <b className="cls-name" style={{ '--cls': classById(c.class_id)?.color } as React.CSSProperties}>{c.name}</b>
                   <span className="muted small"> {n ? `${n} recipes` : memberName(data, c.member_id)}</span>
@@ -108,7 +111,7 @@ function Crafters({ g, open, setOpen, link = false }: { g: { name: string; peopl
                 <span className="skill-bar"><span style={{ width: `${Math.min(100, (p.skill / 300) * 100)}%` }} /></span>
                 <span className="skill">{p.skill || ''}</span>
               </button>
-              {open === key && <ul className="recipe-list">{p.recipes!.map((r) => <li key={r}>{r}</li>)}</ul>}
+              {open === key && <ul className="recipe-list">{p.recipes!.map((r) => <li key={r.name}><GameLink name={r.name} item={r.item} spell={r.spell} /></li>)}</ul>}
             </li>
           )
         })}

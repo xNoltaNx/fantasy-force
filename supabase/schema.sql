@@ -18,7 +18,10 @@ create table if not exists public.guild (
   region text not null default 'us' check (region in ('us', 'eu', 'kr', 'tw')),
   ruleset text not null default 'RP-PvP', -- WoW Forever: one mega-realm per ruleset and region
   faction text not null default 'horde' check (faction in ('', 'horde', 'alliance')),
-  about text not null default ''
+  about text not null default '',
+  rules text not null default '',
+  loot_policy text not null default '',
+  links jsonb not null default '[]' -- [{title, url, note}]
 );
 insert into public.guild (id) values (1) on conflict do nothing;
 
@@ -88,6 +91,28 @@ create table if not exists public.ingame_roster (
   updated_at timestamptz not null default now(),
   recorded_by text not null default '',
   members jsonb not null default '[]' -- [{name, rank, rank_index, level, class_id, note, online, last_online_days}]
+);
+
+-- The guild bank (or the bank alt's bags and bank), as an officer's addon last recorded it (one row).
+create table if not exists public.guild_bank (
+  id int primary key default 1 check (id = 1),
+  source text not null default 'alt' check (source in ('guild', 'alt')),
+  updated_at timestamptz not null default now(),
+  recorded_by text not null default '',
+  money bigint, -- copper
+  tabs jsonb not null default '[]' -- [{name, items: [{id, name, count, quality}]}]
+);
+
+-- Raid nights from the addon: one row per zone and date; a second recording of the same night is joined on import.
+create table if not exists public.raids (
+  key text primary key, -- "Molten Core 2026-11-10"
+  zone text not null,
+  started_at timestamptz not null,
+  ended_at timestamptz not null,
+  recorded_by text not null default '',
+  attendees jsonb not null default '[]', -- character names
+  bosses jsonb not null default '[]', -- [{name, killed_at, attendees}]
+  loot jsonb not null default '[]' -- [{item_id, name, quality, to, at, boss}]
 );
 
 create table if not exists public.signups (
@@ -169,6 +194,8 @@ alter table public.officer_notes enable row level security;
 alter table public.events enable row level security;
 alter table public.signups enable row level security;
 alter table public.ingame_roster enable row level security;
+alter table public.guild_bank enable row level security;
+alter table public.raids enable row level security;
 
 grant usage on schema public to anon, authenticated;
 grant select on public.guild, public.ranks, public.members, public.characters, public.availability, public.events, public.signups to anon, authenticated;
@@ -176,6 +203,7 @@ grant insert, update, delete on public.guild, public.ranks, public.members, publ
   public.officer_notes, public.events, public.signups to authenticated;
 grant select on public.officer_notes to authenticated;
 grant select, insert, update on public.ingame_roster to authenticated;
+grant select, insert, update, delete on public.guild_bank, public.raids to authenticated;
 grant usage, select on sequence public.ranks_id_seq to authenticated;
 grant execute on function public.remove_member(uuid) to authenticated;
 
@@ -220,6 +248,16 @@ drop policy if exists "members read ingame" on public.ingame_roster;
 create policy "members read ingame" on public.ingame_roster for select using (public.is_approved(auth.uid()));
 drop policy if exists "officers write ingame" on public.ingame_roster;
 create policy "officers write ingame" on public.ingame_roster for all using (public.is_officer()) with check (public.is_officer());
+
+-- Guild bank and raids: approved members read, officers bring them in.
+drop policy if exists "members read bank" on public.guild_bank;
+create policy "members read bank" on public.guild_bank for select using (public.is_approved(auth.uid()));
+drop policy if exists "officers write bank" on public.guild_bank;
+create policy "officers write bank" on public.guild_bank for all using (public.is_officer()) with check (public.is_officer());
+drop policy if exists "members read raids" on public.raids;
+create policy "members read raids" on public.raids for select using (public.is_approved(auth.uid()));
+drop policy if exists "officers write raids" on public.raids;
+create policy "officers write raids" on public.raids for all using (public.is_officer()) with check (public.is_officer());
 
 -- Events: everyone reads, officers post.
 drop policy if exists "read events" on public.events;

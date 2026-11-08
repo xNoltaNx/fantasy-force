@@ -6,6 +6,9 @@ export interface Guild {
   ruleset: string // Forever has one mega-realm per ruleset and region: Normal, PvP, RP, RP-PvP, Hardcore
   faction: Faction | '' // '' until set: every race is offered
   about: string
+  rules: string // guild rules, plain text, shown on the Links page
+  loot_policy: string // how loot is handed out, plain text
+  links: GuildLink[] // Discord invite, guides, anything handy
 }
 
 export interface Rank {
@@ -44,7 +47,14 @@ export interface Profession {
   name: string
   skill: number
   max: number
-  recipes?: string[] // names, from the addon once the profession's window has been opened in game
+  recipes?: Recipe[] // from the addon once the profession's window has been opened in game
+}
+
+/** A known recipe: its spell id and the item it makes, when the game gave them (for icons and Wowhead tooltips). */
+export interface Recipe {
+  name: string
+  spell?: number
+  item?: number
 }
 
 /** One line of the guild's in-game roster, as the addon last saw it. */
@@ -100,6 +110,49 @@ export interface OfficerNote {
   updated_at: string
 }
 
+export interface BankItem {
+  id: number
+  name: string
+  count: number
+  quality: number // 0 poor … 4 epic, 5 legendary
+}
+
+/** The guild bank (or a bank alt's bags and bank), as an officer's addon last saw it. */
+export interface GuildBank {
+  source: 'guild' | 'alt'
+  updated_at: string
+  recorded_by: string
+  money: number | null // copper
+  tabs: { name: string; items: BankItem[] }[]
+}
+
+export interface RaidLoot {
+  item_id: number
+  name: string
+  quality: number
+  to: string // character name
+  at: string
+  boss: string // the last boss killed before it dropped; '' if none
+}
+
+/** One raid night in one zone, from the addon: who was there, what died, what dropped to whom. */
+export interface Raid {
+  key: string // zone and date, e.g. "Molten Core 2026-11-10"
+  zone: string
+  started_at: string
+  ended_at: string
+  recorded_by: string
+  attendees: string[] // character names
+  bosses: { name: string; killed_at: string; attendees: string[] }[]
+  loot: RaidLoot[]
+}
+
+export interface GuildLink {
+  title: string
+  url: string
+  note: string
+}
+
 /** Everything the signed-in viewer may see, loaded at once (a guild is small). */
 export interface GuildData {
   guild: Guild
@@ -111,6 +164,8 @@ export interface GuildData {
   signups: Signup[]
   officerNotes: OfficerNote[] // empty unless the viewer is an officer
   inGame: InGameRoster | null // the in-game guild list from the addon; members and officers only
+  bank: GuildBank | null // members and officers only
+  raids: Raid[] // members and officers only
 }
 
 export interface Viewer {

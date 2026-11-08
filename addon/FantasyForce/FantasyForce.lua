@@ -1,6 +1,7 @@
 -- FantasyForce: records this account's characters and the guild roster into
 -- FantasyForceDB (SavedVariables) for the Fantasy Force guild website.
--- No UI, no network. Slash commands: /ff, /ff reset.
+-- Also records the guild bank (or a bank alt's bags and bank), raid attendance and raid loot.
+-- No UI, no network. Slash commands: /ff, /ff reset, /ff bankalt, /ff loot rare|epic.
 -- Plain Lua 5.1; every API call is guarded so a missing function never errors.
 
 local ADDON = "FantasyForce"
@@ -320,10 +321,19 @@ local function readRecipesModern()
   for _, id in ipairs(ids) do
     local info = try(C_TradeSkillUI.GetRecipeInfo, id)
     if type(info) == "table" and info.learned and str(info.name) ~= "" then
-      out[#out + 1] = { id = id, name = info.name }
+      -- the item it makes, for its icon and tooltip on the site
+      local schematic = try(C_TradeSkillUI.GetRecipeSchematic, id, false)
+      local item = type(schematic) == "table" and num(schematic.outputItemID, nil) or nil
+      out[#out + 1] = { id = id, item = item, name = info.name }
     end
   end
   return out
+end
+
+-- An id out of a game link: "item:12784:..." or "enchant:20034" / "spell:20034".
+local function linkId(link, kind)
+  if type(link) ~= "string" then return nil end
+  return tonumber(link:match(kind .. ":(%d+)"))
 end
 
 local function readRecipesClassic()
@@ -331,7 +341,14 @@ local function readRecipesClassic()
   local out = {}
   for i = 1, num(try(GetNumTradeSkills), 0) do
     local name, kind = try(GetTradeSkillInfo, i)
-    if str(name) ~= "" and kind ~= "header" and kind ~= "subheader" then out[#out + 1] = { name = name } end
+    if str(name) ~= "" and kind ~= "header" and kind ~= "subheader" then
+      local recipeLink = try(GetTradeSkillRecipeLink, i)
+      out[#out + 1] = {
+        name = name,
+        id = linkId(recipeLink, "enchant") or linkId(recipeLink, "spell"),
+        item = linkId(try(GetTradeSkillItemLink, i), "item"),
+      }
+    end
   end
   return out
 end
@@ -342,7 +359,10 @@ local function readCraftsClassic()
   local out = {}
   for i = 1, num(try(GetNumCrafts), 0) do
     local name, _, kind = try(GetCraftInfo, i)
-    if str(name) ~= "" and kind ~= "header" then out[#out + 1] = { name = name } end
+    if str(name) ~= "" and kind ~= "header" then
+      local link = try(GetCraftRecipeLink, i) or try(GetCraftItemLink, i)
+      out[#out + 1] = { name = name, id = linkId(link, "enchant") or linkId(link, "spell") }
+    end
   end
   return out
 end
@@ -373,6 +393,320 @@ local RECIPE_EVENTS = {
   CRAFT_SHOW = true, CRAFT_UPDATE = true, NEW_RECIPE_LEARNED = true,
 }
 
+-- ------------------------------------------------------------------- items --
+
+local QUALITY_BY_COLOR = {
+  ["9d9d9d"] = 0, ["ffffff"] = 1, ["1eff00"] = 2, ["0070dd"] = 3, ["a335ee"] = 4, ["ff8000"] = 5, ["e6cc80"] = 6,
+}
+
+-- Item id, name and quality from a hyperlink; name/quality come from the link text and colour
+-- when GetItemInfo hasn't cached the item yet.
+local function parseLink(link)
+  link = str(link)
+  local id = tonumber(link:match("item:(%d+)"))
+  if not id then return nil end
+  local name = link:match("|h%[(.-)%]|h") or ""
+  local quality
+  local gi = (C_Item and C_Item.GetItemInfo) or GetItemInfo
+  local iname, _, iq = try(gi, link)
+  if type(iname) == "string" and iname ~= "" then name = iname end
+  if type(iq) == "number" then quality = iq end
+  if quality == nil then
+    local color = link:match("|cff(%x%x%x%x%x%x)")
+    quality = color and QUALITY_BY_COLOR[color:lower()] or 1
+  end
+  return id, name, quality
+end
+
+-- Adds an item to a tab's list, combining stacks of one item.
+local function addItem(items, index, link, count)
+  local id, name, quality = parseLink(link)
+  if not id then return end
+  count = num(count, 1)
+  if count < 1 then count = 1 end
+  local row = index[id]
+  if row then
+    row.count = row.count + count
+  else
+    row = { id = id, name = name, count = count, quality = quality }
+    index[id] = row
+    items[#items + 1] = row
+  end
+end
+
+-- ------------------------------------------------------------------- bank --
+-- A guild bank (if this client has one) is read tab by tab when opened. A "bank alt" (toggled with
+-- /ff bankalt) records its bags and its bank instead.
+
+local guildTabCache = {}
+local lastBagRecord = 0
+
+local function isBankAlt()
+  local db = initDB()
+  return type(db.bankAlts) == "table" and db.bankAlts[readName()] == true
+end
+
+local function readGuildTab(tab)
+  local items, index = {}, {}
+  local slots = num(MAX_GUILDBANK_SLOTS_PER_TAB, 98)
+  for slot = 1, slots do
+    local link = try(GetGuildBankItemLink, tab, slot)
+    if type(link) == "string" then
+      local _, count = try(GetGuildBankItemInfo, tab, slot)
+      addItem(items, index, link, count)
+    end
+  end
+  return items
+end
+
+local function recordGuildBank()
+  pcall(function()
+    local n = num(try(GetNumGuildBankTabs), 0)
+    if not n or n <= 0 then return end
+    local current = num(try(GetCurrentGuildBankTab), 0)
+    local tabs = {}
+    for tab = 1, n do
+      local name, _, viewable = try(GetGuildBankTabInfo, tab)
+      if type(name) == "string" and (viewable == nil or viewable) then
+        local items = readGuildTab(tab)
+        if #items > 0 or tab == current then guildTabCache[tab] = items end
+        if guildTabCache[tab] then
+          tabs[#tabs + 1] = { name = name, items = guildTabCache[tab] }
+        end
+      end
+    end
+    if #tabs == 0 then return end
+    local bank = { source = "guild", updated = time(), by = readName(), tabs = tabs }
+    local money = try(GetGuildBankMoney)
+    if type(money) == "number" then bank.money = money end
+    initDB().bank = bank
+  end)
+end
+
+local function queryGuildBankTabs()
+  pcall(function()
+    local n = num(try(GetNumGuildBankTabs), 0)
+    for tab = 1, n do
+      local _, _, viewable = try(GetGuildBankTabInfo, tab)
+      if viewable == nil or viewable then try(QueryGuildBankTab, tab) end
+    end
+  end)
+end
+
+local function readBagContainer(bag, items, index)
+  local getSlots = (C_Container and C_Container.GetContainerNumSlots) or GetContainerNumSlots
+  local getInfo = (C_Container and C_Container.GetContainerItemInfo) or GetContainerItemInfo
+  local getLink = (C_Container and C_Container.GetContainerItemLink) or GetContainerItemLink
+  local slots = num(try(getSlots, bag), 0)
+  for slot = 1, slots do
+    local a, b = try(getInfo, bag, slot)
+    local link, count
+    if type(a) == "table" then
+      link, count = a.hyperlink, a.stackCount
+    else
+      count = b -- legacy: icon, count, ...
+    end
+    if type(link) ~= "string" then link = try(getLink, bag, slot) end
+    if type(link) == "string" then addItem(items, index, link, count) end
+  end
+end
+
+local function bagTab(name, containers)
+  local items, index = {}, {}
+  for _, bag in ipairs(containers) do readBagContainer(bag, items, index) end
+  return { name = name, items = items }
+end
+
+local function bagIds()
+  local n = num(NUM_BAG_SLOTS, 4)
+  local ids = {}
+  for b = 0, n do ids[#ids + 1] = b end
+  return ids
+end
+
+local function bankIds()
+  local first = num(NUM_BAG_SLOTS, 4) + 1
+  local last = first + num(NUM_BANKBAGSLOTS, 7) - 1
+  local ids = { -1 }
+  for b = first, last do ids[#ids + 1] = b end
+  return ids
+end
+
+local function recordAltBank(withBank)
+  pcall(function()
+    if not isBankAlt() then return end
+    local db = initDB()
+    local me = readName()
+    local tabs = { bagTab("Bags", bagIds()) }
+    if withBank then
+      tabs[2] = bagTab("Bank", bankIds())
+    elseif type(db.bank) == "table" and db.bank.source == "alt" and db.bank.by == me and type(db.bank.tabs) == "table" then
+      for _, t in ipairs(db.bank.tabs) do
+        if t.name == "Bank" then tabs[2] = t end
+      end
+    end
+    local bank = { source = "alt", updated = time(), by = me, tabs = tabs }
+    local money = try(GetMoney)
+    if type(money) == "number" then bank.money = money end
+    db.bank = bank
+  end)
+end
+
+-- ------------------------------------------------------------------ raids --
+
+local MAX_RAIDS = 60
+local SNAPSHOT_SECONDS = 600
+local curRaid = nil
+local lastBoss = ""
+local lastBossAt = 0
+local tickerStarted = false
+
+local function raidInstanceName()
+  local name, instanceType = try(GetInstanceInfo)
+  if instanceType == "raid" and type(name) == "string" and name ~= "" then
+    if try(IsInRaid) then return name end
+  end
+  return nil
+end
+
+local function readRoster()
+  local names, seen = {}, {}
+  local n = num(try(GetNumGroupMembers), 0)
+  if not n or n <= 0 then n = num(try(GetNumRaidMembers), 0) end
+  for i = 1, n do
+    local name = stripRealm(str((try(GetRaidRosterInfo, i))))
+    if name ~= "" and not seen[name] then
+      seen[name] = true
+      names[#names + 1] = name
+    end
+  end
+  return names
+end
+
+local function mergeNames(into, names)
+  local seen = {}
+  for _, n in ipairs(into) do seen[n] = true end
+  for _, n in ipairs(names) do
+    if not seen[n] then
+      seen[n] = true
+      into[#into + 1] = n
+    end
+  end
+end
+
+-- Finds or starts the record for this raid today. Returns it, or nil when not in a raid instance.
+local function ensureRaid()
+  local zone = raidInstanceName()
+  if not zone then
+    curRaid = nil
+    return nil
+  end
+  local now = time()
+  local key = zone .. " " .. date("%Y-%m-%d", now)
+  if curRaid and curRaid.key == key then return curRaid end
+  local db = initDB()
+  if type(db.raids) ~= "table" then db.raids = {} end
+  curRaid = nil
+  for i = #db.raids, math.max(1, #db.raids - 5), -1 do
+    if db.raids[i].key == key then curRaid = db.raids[i] break end
+  end
+  if not curRaid then
+    curRaid = { key = key, zone = zone, started = now, ended = now, by = readName(),
+      attendees = {}, bosses = {}, loot = {} }
+    db.raids[#db.raids + 1] = curRaid
+    while #db.raids > MAX_RAIDS do table.remove(db.raids, 1) end
+    lastBoss = ""
+  end
+  return curRaid
+end
+
+-- Snapshots the roster into the raid; returns the roster (or nil).
+local function snapshotRaid()
+  local raid = ensureRaid()
+  if not raid then return nil end
+  local names = readRoster()
+  if #names == 0 then return nil end
+  mergeNames(raid.attendees, names)
+  raid.ended = time()
+  return names
+end
+
+local function recordBossKill(bossName)
+  pcall(function()
+    local raid = ensureRaid()
+    if not raid then return end
+    bossName = str(bossName)
+    local now = time()
+    if bossName == lastBoss and now - lastBossAt < 60 then return end -- ENCOUNTER_END and BOSS_KILL both fired
+    local names = snapshotRaid() or {}
+    raid.bosses[#raid.bosses + 1] = { name = bossName, killed = now, attendees = names }
+    lastBoss, lastBossAt = bossName, now
+  end)
+end
+
+local function startTicker()
+  if tickerStarted then return end
+  if not (C_Timer and type(C_Timer.NewTicker) == "function") then return end
+  tickerStarted = true
+  try(C_Timer.NewTicker, SNAPSHOT_SECONDS, function() pcall(snapshotRaid) end)
+end
+
+-- ------------------------------------------------------------------- loot --
+
+-- A client format string ("%s receives loot: %s.") as an anchored Lua pattern, so it works in any language.
+local function formatToPattern(fmt)
+  if type(fmt) ~= "string" or fmt == "" then return nil end
+  local p = fmt:gsub("[%^%$%(%)%%%.%[%]%*%+%-%?]", "%%%0")
+  p = p:gsub("%%%%%d%%%$s", "(.+)"):gsub("%%%%s", "(.+)")
+  p = p:gsub("%%%%%d%%%$d", "(%%d+)"):gsub("%%%%d", "(%%d+)")
+  return "^" .. p .. "$"
+end
+
+-- Order matters: the "multiple" forms must be tried before the single ones.
+local LOOT_FORMS = {
+  { global = "LOOT_ITEM_SELF_MULTIPLE", self = true, multi = true },
+  { global = "LOOT_ITEM_SELF", self = true },
+  { global = "LOOT_ITEM_MULTIPLE", multi = true },
+  { global = "LOOT_ITEM" },
+}
+local lootPatterns = nil
+
+local function getLootPatterns()
+  if lootPatterns then return lootPatterns end
+  lootPatterns = {}
+  for _, f in ipairs(LOOT_FORMS) do
+    local p = formatToPattern(_G and _G[f.global])
+    if p then lootPatterns[#lootPatterns + 1] = { pattern = p, self = f.self, multi = f.multi } end
+  end
+  return lootPatterns
+end
+
+local function recordLoot(msg)
+  pcall(function()
+    msg = str(msg)
+    if msg == "" then return end
+    local raid = ensureRaid()
+    if not raid then return end
+    for _, f in ipairs(getLootPatterns()) do
+      local a, b, c = msg:match(f.pattern)
+      if a then
+        local who, link
+        if f.self then
+          who, link = readName(), a
+        else
+          who, link = stripRealm(a), b
+        end
+        local id, name, quality = parseLink(link)
+        if id and quality >= num(initDB().lootQuality, 4) then
+          raid.loot[#raid.loot + 1] = { id = id, name = name, quality = quality, to = who,
+            at = time(), boss = lastBoss }
+        end
+        return
+      end
+    end
+  end)
+end
+
 -- ----------------------------------------------------------------- events --
 
 local frame = CreateFrame and CreateFrame("Frame") or nil
@@ -381,6 +715,9 @@ if frame then
     "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "PLAYER_LEVEL_UP", "SKILL_LINES_CHANGED",
     "PLAYER_TALENT_UPDATE", "ACTIVE_TALENT_GROUP_CHANGED", "CHARACTER_POINTS_CHANGED",
     "PLAYER_GUILD_UPDATE", "GUILD_ROSTER_UPDATE", "PLAYER_LOGOUT",
+    "GUILDBANKFRAME_OPENED", "GUILDBANKBAGSLOTS_CHANGED", "BANKFRAME_OPENED", "BAG_UPDATE_DELAYED",
+    "ZONE_CHANGED_NEW_AREA", "GROUP_ROSTER_UPDATE", "RAID_ROSTER_UPDATE",
+    "ENCOUNTER_END", "BOSS_KILL", "CHAT_MSG_LOOT",
   }
   for ev in pairs(RECIPE_EVENTS) do events[#events + 1] = ev end
   for _, ev in ipairs(events) do
@@ -388,12 +725,37 @@ if frame then
     pcall(frame.RegisterEvent, frame, ev)
   end
 
-  frame:SetScript("OnEvent", function(_, event)
+  frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
     local ok = pcall(function()
       if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         loggedIn = true
         recordCharacter()
         requestRoster()
+        startTicker()
+        snapshotRaid()
+        if event == "PLAYER_LOGIN" then lastBagRecord = time() recordAltBank(false) end
+      elseif event == "GUILDBANKFRAME_OPENED" then
+        queryGuildBankTabs()
+        recordGuildBank()
+      elseif event == "GUILDBANKBAGSLOTS_CHANGED" then
+        recordGuildBank()
+      elseif event == "BANKFRAME_OPENED" then
+        recordAltBank(true)
+      elseif event == "BAG_UPDATE_DELAYED" then
+        local now = time()
+        if loggedIn and now - lastBagRecord >= 10 then
+          lastBagRecord = now
+          recordAltBank(false)
+        end
+      elseif event == "ZONE_CHANGED_NEW_AREA" or event == "GROUP_ROSTER_UPDATE" or event == "RAID_ROSTER_UPDATE" then
+        if loggedIn then snapshotRaid() end
+      elseif event == "ENCOUNTER_END" then
+        -- encounterID, encounterName, difficultyID, groupSize, success
+        if arg5 == 1 or arg5 == true then recordBossKill(arg2) end
+      elseif event == "BOSS_KILL" then
+        recordBossKill(arg2)
+      elseif event == "CHAT_MSG_LOOT" then
+        recordLoot(arg1)
       elseif event == "GUILD_ROSTER_UPDATE" then
         if loggedIn then recordGuild() end
       elseif event == "PLAYER_GUILD_UPDATE" then
@@ -403,6 +765,7 @@ if frame then
         if loggedIn then recordRecipes(event) end
       elseif event == "PLAYER_LOGOUT" then
         recordCharacter()
+        recordAltBank(false)
       else
         if loggedIn then recordCharacter() end
       end
@@ -428,6 +791,24 @@ SlashCmdList["FANTASYFORCE"] = function(msg)
       print_("data cleared (this character re-recorded).")
       return
     end
+    if msg == "bankalt" then
+      if type(db.bankAlts) ~= "table" then db.bankAlts = {} end
+      local me = readName()
+      if db.bankAlts[me] then
+        db.bankAlts[me] = nil
+        print_(me .. " is no longer the guild's bank alt.")
+      else
+        db.bankAlts[me] = true
+        print_(me .. " is now the guild's bank alt: its bags and bank are recorded.")
+        recordAltBank(false)
+      end
+      return
+    end
+    if msg == "loot rare" or msg == "loot epic" then
+      db.lootQuality = msg == "loot rare" and 3 or 4
+      print_("raid loot recorded from " .. (db.lootQuality == 3 and "rare (blue)" or "epic (purple)") .. " up.")
+      return
+    end
     local chars = 0
     local latest = 0
     for _, c in pairs(db.characters) do
@@ -441,8 +822,10 @@ SlashCmdList["FANTASYFORCE"] = function(msg)
       if gupd > latest then latest = gupd end
     end
     local last = latest > 0 and date("%Y-%m-%d %H:%M", latest) or "never"
-    print_(chars .. " characters, " .. members .. " guild members, last update " .. last
-      .. ". Saved on logout or /reload. /ff reset clears.")
+    local raids = type(db.raids) == "table" and #db.raids or 0
+    print_(chars .. " characters, " .. members .. " guild members, " .. raids .. " raids, last update " .. last
+      .. ". " .. (isBankAlt() and "This character is a bank alt." or "Not a bank alt (/ff bankalt).")
+      .. " Saved on logout or /reload. /ff reset clears.")
   end)
   if not ok then print_("something went wrong.") end
 end

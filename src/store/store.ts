@@ -1,5 +1,27 @@
 import type { ImportedCharacter } from '../addonFile'
-import type { Character, Guild, GuildData, GuildEvent, InGameRoster, Member, Rank, Signup, Viewer } from '../types'
+import type { Character, Guild, GuildBank, GuildData, GuildEvent, InGameRoster, Member, Raid, Rank, Signup, Viewer } from '../types'
+
+const union = (a: string[], b: string[]) => [...new Set([...a, ...b])]
+
+/** Two recordings of the same raid night (two officers' addons) joined: everyone seen, every boss, each drop once. */
+export function mergeRaid(a: Raid, b: Raid): Raid {
+  const bosses = [...a.bosses]
+  for (const x of b.bosses) {
+    const same = bosses.findIndex((y) => y.name === x.name)
+    if (same >= 0) bosses[same] = { ...bosses[same]!, attendees: union(bosses[same]!.attendees, x.attendees) }
+    else bosses.push(x)
+  }
+  const lootKey = (l: Raid['loot'][number]) => `${l.item_id}|${l.name}|${l.to}|${l.at.slice(0, 16)}`
+  const seen = new Set(a.loot.map(lootKey))
+  return {
+    ...a,
+    started_at: a.started_at < b.started_at ? a.started_at : b.started_at,
+    ended_at: a.ended_at > b.ended_at ? a.ended_at : b.ended_at,
+    attendees: union(a.attendees, b.attendees),
+    bosses: bosses.sort((x, y) => x.killed_at.localeCompare(y.killed_at)),
+    loot: [...a.loot, ...b.loot.filter((l) => !seen.has(lootKey(l)))].sort((x, y) => x.at.localeCompare(y.at)),
+  }
+}
 
 /** The rows an import writes: existing characters (by name, any case) updated, new ones added. */
 export function mergeImport(existing: Character[], memberId: string, chars: ImportedCharacter[]): CharacterInput[] {
@@ -56,6 +78,9 @@ export interface Store {
   /** Add or update a member's characters from the addon's file, matched by name; their main stays their main. */
   importCharacters(memberId: string, chars: ImportedCharacter[]): Promise<void>
   saveInGameRoster(r: InGameRoster): Promise<void>
+  saveBank(b: GuildBank): Promise<void>
+  /** Add raids from the addon; a night already on the site is joined with the new recording (mergeRaid). */
+  importRaids(raids: Raid[]): Promise<void>
 
   saveOfficerNote(memberId: string, note: string): Promise<void>
   saveRank(r: Omit<Rank, 'id'> & { id?: number }): Promise<void>

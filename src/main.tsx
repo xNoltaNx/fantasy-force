@@ -1,4 +1,5 @@
-import { StrictMode, useEffect } from 'react'
+import { StrictMode, useEffect, useState } from 'react'
+import { useWowheadRefresh } from './wowhead'
 import { createRoot } from 'react-dom/client'
 import { AppProvider, useApp, useRoute } from './app'
 import { Avatar } from './bits'
@@ -8,6 +9,9 @@ import { Events } from './pages/Events'
 import { MyCharacters } from './pages/MyCharacters'
 import { Officers } from './pages/Officers'
 import { Professions } from './pages/Professions'
+import { Bank } from './pages/Bank'
+import { Links } from './pages/Links'
+import { Raids } from './pages/Raids'
 import { Roster } from './pages/Roster'
 import { demo, store } from './store'
 import '@fontsource/fredoka/500.css'
@@ -24,12 +28,15 @@ applyTheme()
 // The guild's logo, in public/. Swap the file to change it.
 const LOGO = `${import.meta.env.BASE_URL}logo-480.webp`
 
-const PAGES = [
+const PAGES: { id: string; name: string; signedIn?: boolean; member?: boolean; officer?: boolean }[] = [
   { id: 'roster', name: 'Roster' },
   { id: 'events', name: 'Events' },
+  { id: 'raids', name: 'Raids', member: true },
   { id: 'availability', name: 'Availability' },
   { id: 'professions', name: 'Professions' },
+  { id: 'bank', name: 'Guild bank', member: true },
   { id: 'balance', name: 'Class balance' },
+  { id: 'links', name: 'Links' },
   { id: 'me', name: 'My characters', signedIn: true },
   { id: 'officers', name: 'Officers', officer: true },
 ]
@@ -38,6 +45,8 @@ function Shell() {
   const { data, viewer, act } = useApp()
   const [page = 'roster', arg] = useRoute()
   const pending = data.members.filter((m) => m.rank_id === null).length
+  const [clicks, setClicks] = useState(0)
+  useWowheadRefresh(`${page}/${arg}/${clicks}/${JSON.stringify(data).length}`)
   useEffect(() => { document.title = data.guild.name }, [data.guild.name])
 
   return (
@@ -64,18 +73,22 @@ function Shell() {
         </div>
       </header>
       <nav className="tabs">
-        {PAGES.filter((p) => (!p.signedIn || viewer) && (!p.officer || viewer?.isOfficer)).map((p) => (
+        {PAGES.filter((p) => (!p.signedIn || viewer) && (!p.member || viewer?.isApproved) && (!p.officer || viewer?.isOfficer)).map((p) => (
           <a key={p.id} href={`#/${p.id}`} className={page === p.id ? 'on' : ''}>
             {p.name}{p.id === 'officers' && pending > 0 ? <span className="count">{pending}</span> : null}
           </a>
         ))}
       </nav>
-      <main>
+      {/* any click or typing may reveal new item links (an opened list, a search); have Wowhead look again */}
+      <main onClick={() => setClicks((n) => n + 1)} onInput={() => setClicks((n) => n + 1)}>
         {page === 'roster' && <Roster />}
         {page === 'events' && <Events />}
         {page === 'availability' && <Availability />}
         {page === 'balance' && <Balance />}
         {page === 'professions' && <Professions pick={arg} />}
+        {page === 'raids' && <Raids />}
+        {page === 'bank' && <Bank />}
+        {page === 'links' && <Links />}
         {page === 'me' && <MyCharacters key={arg ?? 'me'} memberId={arg} />}
         {page === 'officers' && <Officers />}
       </main>

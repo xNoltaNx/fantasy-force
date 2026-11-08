@@ -1,6 +1,6 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import type { Availability, Character, Guild, GuildData, GuildEvent, InGameRoster, Member, OfficerNote, Rank, Signup, Viewer } from '../types'
-import { mergeImport, viewerFrom, type Store } from './store'
+import type { Availability, Character, Guild, GuildBank, GuildData, GuildEvent, InGameRoster, Member, OfficerNote, Raid, Rank, Signup, Viewer } from '../types'
+import { mergeImport, mergeRaid, viewerFrom, type Store } from './store'
 
 // The live site: Supabase holds the data, Discord signs people in, and the row rules in
 // supabase/schema.sql decide who may read and change what. Nothing here is trusted for that.
@@ -52,12 +52,13 @@ export class SupabaseStore implements Store {
 
   async load(): Promise<GuildData> {
     const t = <R,>(name: string) => this.rows<R>(this.db.from(name).select('*'))
-    const [guilds, ranks, members, characters, availability, events, signups, officerNotes, inGame] = await Promise.all([
+    const [guilds, ranks, members, characters, availability, events, signups, officerNotes, inGame, bank, raids] = await Promise.all([
       t<Guild>('guild'), t<Rank>('ranks'), t<Member>('members'), t<Character>('characters'), t<Availability>('availability'),
       t<GuildEvent>('events'), t<Signup>('signups'), t<OfficerNote>('officer_notes'), t<InGameRoster>('ingame_roster'),
+      t<GuildBank>('guild_bank'), t<Raid>('raids'),
     ])
     if (!guilds[0]) throw new Error('The guild table is empty: run supabase/schema.sql in your Supabase project.')
-    return { guild: guilds[0], ranks, members, characters, availability, events, signups, officerNotes, inGame: inGame[0] ?? null }
+    return { guild: guilds[0], ranks, members, characters, availability, events, signups, officerNotes, inGame: inGame[0] ?? null, bank: bank[0] ?? null, raids }
   }
 
   async updateMember(memberId: string, patch: object) {
@@ -113,6 +114,20 @@ export class SupabaseStore implements Store {
 
   async saveInGameRoster(r: Parameters<Store['saveInGameRoster']>[0]) {
     await this.ok(this.db.from('ingame_roster').upsert({ id: 1, ...r }))
+  }
+
+  async saveBank(b: Parameters<Store['saveBank']>[0]) {
+    await this.ok(this.db.from('guild_bank').upsert({ id: 1, ...b }))
+  }
+
+  async importRaids(raids: Parameters<Store['importRaids']>[0]) {
+    if (!raids.length) return
+    const have = await this.rows<Raid>(this.db.from('raids').select('*').in('key', raids.map((r) => r.key)))
+    const rows = raids.map((r) => {
+      const old = have.find((x) => x.key === r.key)
+      return old ? mergeRaid(old, r) : r
+    })
+    await this.ok(this.db.from('raids').upsert(rows))
   }
 
   async saveOfficerNote(memberId: string, note: string) {

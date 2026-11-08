@@ -10,6 +10,9 @@
       document.documentElement.dataset.theme = localStorage.getItem('guild-roster-theme') === 'light' ? 'light' : 'dark'
     </script>
     <title>Fantasy Force</title>
+    <!-- Wowhead tooltips: game icons on item and recipe links, the in-game tooltip on hover. Our own colours, not theirs. -->
+    <script>const whTooltips = { colorLinks: false, iconizeLinks: true, renameLinks: false, iconSize: 'small' }</script>
+    <script src="https://wow.zamimg.com/js/tooltips.js" async></script>
   </head>
   <body>
     <div id="root"></div>

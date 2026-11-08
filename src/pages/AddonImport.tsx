@@ -21,7 +21,7 @@ export function AddonImport({ memberId }: { memberId: string }) {
     setDone('')
     try {
       const parsed = readAddonFile(await f.text())
-      if (!parsed.characters.length && !parsed.guild) throw new Error('The file has no characters yet. Log in on each character once, then log out or type /reload.')
+      if (!parsed.characters.length && !parsed.guild && !parsed.bank && !parsed.raids.length) throw new Error('The file has no characters yet. Log in on each character once, then log out or type /reload.')
       setFile(parsed)
       setError('')
       const inGuild = parsed.characters.filter((c) => c.inGuild)
@@ -93,6 +93,16 @@ export function AddonImport({ memberId }: { memberId: string }) {
                   setDone(`In-game guild list updated: ${g.members.length} members.`)
                 }
               }}>Update the in-game guild list ({file.guild.members.length})</button>
+            )}
+            {viewer?.isOfficer && file.bank && (
+              <button className="button ghost" onClick={async () => {
+                if (await act(() => store.saveBank(file.bank!))) setDone(`Guild bank updated: ${file.bank!.tabs.reduce((n, t) => n + t.items.length, 0)} kinds of item.`)
+              }}>Update the guild bank</button>
+            )}
+            {viewer?.isOfficer && file.raids.length > 0 && (
+              <button className="button ghost" onClick={async () => {
+                if (await act(() => store.importRaids(file.raids))) setDone(`${file.raids.length} ${file.raids.length === 1 ? 'raid' : 'raids'} brought in.`)
+              }}>Bring in raids ({file.raids.length})</button>
             )}
             <button className="button ghost" onClick={() => setFile(null)}>Cancel</button>
           </div>

@@ -20,7 +20,7 @@ FantasyForceDB = {
 			},
 			["recipes"] = {
 				["Blacksmithing"] = {
-					{ ["id"] = 16988, ["name"] = "Arcanite Reaper", }, -- [1]
+					{ ["id"] = 16988, ["item"] = 12784, ["name"] = "Arcanite Reaper", }, -- [1]
 					{ ["name"] = "Lionheart Helm", }, -- [2]
 				},
 				["Cooking"] = {
@@ -69,6 +69,46 @@ describe('parseLuaTable', () => {
   })
 })
 
+const BANK_AND_RAIDS = `FantasyForceDB = {
+  bank = { source = "guild", updated = 1731100000, by = "Grukka Stonefist", money = 1234567,
+    tabs = {
+      { name = "Consumables", items = { { id = 13446, name = "Major Healing Potion", count = 40, quality = 1 }, { id = 12360, name = "Arcanite Bar", count = 3, quality = 2 } } },
+      { name = "Mats", items = {} },
+    },
+  },
+  raids = {
+    { key = "Molten Core 2026-11-10", zone = "Molten Core", started = 1731100000, ended = 1731110000, by = "Grukka Stonefist",
+      attendees = { "Grukka Stonefist", "Pip Ashwhistle" },
+      bosses = { { name = "Lucifron", killed = 1731101000, attendees = { "Grukka Stonefist", "Pip Ashwhistle" } } },
+      loot = { { id = 16800, name = "Arcanist Boots", quality = 4, to = "Pip Ashwhistle", at = 1731101200, boss = "Lucifron" } },
+    },
+  },
+}`
+
+describe('readAddonFile: bank and raids', () => {
+  it('reads the guild bank by tab, with gold', () => {
+    const f = readAddonFile(BANK_AND_RAIDS)
+    expect(f.bank).toEqual({
+      source: 'guild', updated_at: new Date(1731100000 * 1000).toISOString(), recorded_by: 'Grukka Stonefist', money: 1234567,
+      tabs: [
+        { name: 'Consumables', items: [{ id: 13446, name: 'Major Healing Potion', count: 40, quality: 1 }, { id: 12360, name: 'Arcanite Bar', count: 3, quality: 2 }] },
+        { name: 'Mats', items: [] },
+      ],
+    })
+  })
+
+  it('reads raids with bosses, attendance and loot', () => {
+    const [r] = readAddonFile(BANK_AND_RAIDS).raids
+    expect(r).toEqual({
+      key: 'Molten Core 2026-11-10', zone: 'Molten Core', recorded_by: 'Grukka Stonefist',
+      started_at: new Date(1731100000 * 1000).toISOString(), ended_at: new Date(1731110000 * 1000).toISOString(),
+      attendees: ['Grukka Stonefist', 'Pip Ashwhistle'],
+      bosses: [{ name: 'Lucifron', killed_at: new Date(1731101000 * 1000).toISOString(), attendees: ['Grukka Stonefist', 'Pip Ashwhistle'] }],
+      loot: [{ item_id: 16800, name: 'Arcanist Boots', quality: 4, to: 'Pip Ashwhistle', at: new Date(1731101200 * 1000).toISOString(), boss: 'Lucifron' }],
+    })
+  })
+})
+
 describe('readAddonFile', () => {
   it('reads characters with their class, race, spec, role and professions', () => {
     const f = readAddonFile(SAMPLE)
@@ -76,9 +116,9 @@ describe('readAddonFile', () => {
     const g = f.characters.find((c) => c.name === 'Grukka Stonefist')!
     expect(g).toMatchObject({ class_id: 'warrior', race: 'orc', level: 60, spec: 'Protection', role: 'tank', inGuild: true })
     expect(g.professions).toEqual([
-      { name: 'Blacksmithing', skill: 300, max: 300, recipes: ['Arcanite Reaper', 'Lionheart Helm'] },
+      { name: 'Blacksmithing', skill: 300, max: 300, recipes: [{ name: 'Arcanite Reaper', spell: 16988, item: 12784 }, { name: 'Lionheart Helm' }] },
       { name: 'Mining', skill: 285, max: 300 },
-      { name: 'Cooking', skill: 0, max: 0, recipes: ['Grilled Squid'] }, // recipes for a skill the list didn't name still arrive
+      { name: 'Cooking', skill: 0, max: 0, recipes: [{ name: 'Grilled Squid' }] }, // recipes for a skill the list didn't name still arrive
     ])
     const m = f.characters.find((c) => c.name === 'Mossy Underbridge')!
     expect(m).toMatchObject({ class_id: 'druid', race: 'tauren', spec: 'Feral (cat)', role: 'dps', inGuild: false })

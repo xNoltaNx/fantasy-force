@@ -1,12 +1,12 @@
 import type { GuildData, Viewer } from '../types'
 import { seedData } from './seed'
-import { mergeImport, viewerFrom, type Store } from './store'
+import { mergeImport, mergeRaid, viewerFrom, type Store } from './store'
 
 // The demo: an example guild kept in this browser's storage. "Viewing as" picks who you are, so every
 // view (visitor, member, officer, someone waiting for approval) can be tried without Supabase. It hides
 // what Supabase's row rules would hide, so the demo shows what each person really sees.
 
-const DATA_KEY = 'guild-roster-demo-forever-2'
+const DATA_KEY = 'guild-roster-demo-forever-3'
 const VIEWER_KEY = 'guild-roster-demo-viewer'
 
 export class DemoStore implements Store {
@@ -81,6 +81,8 @@ export class DemoStore implements Store {
       availability: d.availability.filter((a) => visible.has(a.member_id)),
       officerNotes: [],
       inGame: v?.isApproved ? d.inGame ?? null : null,
+      bank: v?.isApproved ? d.bank ?? null : null,
+      raids: v?.isApproved ? d.raids ?? [] : [],
     }
   }
 
@@ -173,6 +175,22 @@ export class DemoStore implements Store {
 
   async saveInGameRoster(r: Parameters<Store['saveInGameRoster']>[0]) {
     this.change((d) => (d.inGame = r))
+  }
+
+  async saveBank(b: Parameters<Store['saveBank']>[0]) {
+    this.change((d) => (d.bank = b))
+  }
+
+  async importRaids(raids: Parameters<Store['importRaids']>[0]) {
+    this.change((d) => {
+      const all = [...(d.raids ?? [])]
+      for (const r of raids) {
+        const i = all.findIndex((x) => x.key === r.key)
+        if (i >= 0) all[i] = mergeRaid(all[i]!, r)
+        else all.push(r)
+      }
+      d.raids = all
+    })
   }
 
   async saveOfficerNote(memberId: string, note: string) {
