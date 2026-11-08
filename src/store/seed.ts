@@ -55,6 +55,27 @@ const CHARS: [string, string, string, string, number, P[]][][] = [
   [['Quill Redmane', 'orc', 'warrior', 'Fury', 37, [['Mining', 160], ['Blacksmithing', 155]]]],
 ]
 
+// Recipes for the example crafters, roughly low to high skill: a character knows the share their skill reaches.
+const RECIPES: Record<string, string[]> = {
+  Blacksmithing: ['Rough Sharpening Stone', 'Copper Chain Belt', 'Heavy Sharpening Stone', 'Mithril Spurs', 'Thorium Bracers',
+    'Dense Weightstone', 'Dark Iron Plate', 'Fiery Weapon', 'Lionheart Helm', 'Arcanite Reaper'],
+  Alchemy: ['Minor Healing Potion', 'Swiftness Potion', 'Elixir of Fortitude', 'Greater Fire Protection Potion', 'Elixir of the Mongoose',
+    'Major Healing Potion', 'Major Mana Potion', 'Transmute: Arcanite', 'Flask of the Titans'],
+  Enchanting: ['Enchant Bracer - Minor Health', 'Enchant Boots - Minor Speed', 'Enchant Chest - Major Health', 'Enchant Bracer - Superior Stamina',
+    'Enchant Gloves - Greater Agility', 'Enchant 2H Weapon - Agility', 'Enchant Weapon - Crusader'],
+  Tailoring: ['Linen Bag', 'Bolt of Runecloth', 'Runecloth Bag', 'Mooncloth Bag', 'Truefaith Vestments', 'Robe of the Archmage'],
+  Leatherworking: ['Light Armor Kit', 'Rugged Armor Kit', 'Devilsaur Gauntlets', 'Devilsaur Leggings', 'Core Armor Kit'],
+  Engineering: ['Rough Dynamite', 'Hi-Explosive Bomb', 'Thorium Grenade', 'Goblin Sapper Charge', 'Arcanite Dragonling'],
+  Cooking: ['Roasted Boar Meat', 'Grilled Squid', 'Nightfin Soup', 'Smoked Desert Dumplings', 'Dragonbreath Chili'],
+  'First Aid': ['Linen Bandage', 'Heavy Mageweave Bandage', 'Heavy Runecloth Bandage'],
+}
+
+function recipesAt(name: string, skill: number): string[] | undefined {
+  const all = RECIPES[name]
+  if (!all) return undefined
+  return all.slice(0, Math.max(1, Math.round((skill / 300) * all.length))).sort()
+}
+
 // Usual play windows in each player's own evening, as [first local hour, last local hour, weekdays (0=Mon)].
 const WINDOWS: [number, number, number[]][] = [
   [18, 22, [1, 2, 3, 5]], [19, 23, [0, 1, 3, 6]], [19, 22, [1, 3, 4]], [19, 23, [1, 2, 3, 6]],
@@ -97,7 +118,7 @@ export function seedData(): GuildData {
   CHARS.forEach((list, i) => list.forEach(([name, race, classId, spec, level, profs], j) => {
     characters.push({ id: `c${i + 1}-${j}`, member_id: `m${i + 1}`, name, race, class_id: classId, spec,
       role: roleFor(classId, spec), is_main: j === 0, level, note: '',
-      professions: profs.map(([n, skill]) => ({ name: n, skill, max: 300 })) })
+      professions: profs.map(([n, skill]) => ({ name: n, skill, max: 300, recipes: recipesAt(n, skill) })) })
   }))
   characters.push({ id: 'c-new', member_id: 'm-new', name: 'Fenwick Tallgrass', race: 'tauren', class_id: 'warrior',
     spec: 'Protection', role: 'tank', is_main: true, level: 51, note: '', professions: [['Mining', 230], ['Blacksmithing', 225]].map(([n, s]) => ({ name: n as string, skill: s as number, max: 300 })) })

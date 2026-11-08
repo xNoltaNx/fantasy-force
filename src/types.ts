@@ -44,6 +44,7 @@ export interface Profession {
   name: string
   skill: number
   max: number
+  recipes?: string[] // names, from the addon once the profession's window has been opened in game
 }
 
 /** One line of the guild's in-game roster, as the addon last saw it. */

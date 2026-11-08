@@ -25,6 +25,12 @@ describe('mergeImport', () => {
     expect(row).toMatchObject({ spec: 'Feral (bear)', role: 'tank' })
   })
 
+  it('keeps recipes already on the site when the file has none for that profession', () => {
+    const [row] = mergeImport([existing({ professions: [{ name: 'Mining', skill: 280, max: 300, recipes: ['Smelt Thorium'] }] })], 'm1',
+      [imported({ professions: [{ name: 'Mining', skill: 300, max: 300 }] })])
+    expect(row!.professions).toEqual([{ name: 'Mining', skill: 300, max: 300, recipes: ['Smelt Thorium'] }])
+  })
+
   it('makes the first new character the main only when there is none', () => {
     expect(mergeImport([], 'm1', [imported({}), imported({ name: 'Alt' })]).map((r) => r.is_main)).toEqual([true, false])
     expect(mergeImport([existing({ name: 'Other' })], 'm1', [imported({})])[0]!.is_main).toBe(false)

@@ -6,7 +6,7 @@ import { mergeImport, viewerFrom, type Store } from './store'
 // view (visitor, member, officer, someone waiting for approval) can be tried without Supabase. It hides
 // what Supabase's row rules would hide, so the demo shows what each person really sees.
 
-const DATA_KEY = 'guild-roster-demo-forever'
+const DATA_KEY = 'guild-roster-demo-forever-2'
 const VIEWER_KEY = 'guild-roster-demo-viewer'
 
 export class DemoStore implements Store {

@@ -18,6 +18,14 @@ FantasyForceDB = {
 				{ ["name"] = "Mining", ["skill"] = 300, ["max"] = 300, }, -- [2]
 				{ ["name"] = "Fishing", ["skill"] = 150, ["max"] = 225, }, -- [3]
 			},
+			["recipes"] = {
+				["Engineering"] = {
+					{ ["id"] = 3919, ["name"] = "Rough Dynamite", }, -- [1]
+					{ ["id"] = 12619, ["name"] = "Hi-Explosive Bomb", }, -- [2]
+					{ ["id"] = 19790, ["name"] = "Thorium Grenade", }, -- [3]
+					{ ["id"] = 12760, ["name"] = "Goblin Sapper Charge", }, -- [4]
+				},
+			},
 			["guild"] = "Fantasy Force",
 			["rank"] = "Raider",
 			["updated"] = 1762632000,

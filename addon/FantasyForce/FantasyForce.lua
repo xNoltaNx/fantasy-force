@@ -290,6 +290,89 @@ local function recordGuild()
   end)
 end
 
+-- ---------------------------------------------------------------- recipes --
+-- The game only lists recipes while a profession window is open, so they're recorded then
+-- (per character, per profession) and kept until that window is opened again.
+
+local function viewingSomeoneElse()
+  if C_TradeSkillUI then
+    if try(C_TradeSkillUI.IsTradeSkillLinked) or try(C_TradeSkillUI.IsTradeSkillGuild) or try(C_TradeSkillUI.IsNPCCrafting) then return true end
+  end
+  if try(IsTradeSkillLinked) then return true end
+  return false
+end
+
+local function tradeSkillName()
+  if C_TradeSkillUI then
+    local info = try(C_TradeSkillUI.GetBaseProfessionInfo)
+    if type(info) == "table" and str(info.professionName) ~= "" then return info.professionName end
+  end
+  local name = try(GetTradeSkillLine)
+  if str(name) ~= "" and name ~= "UNKNOWN" then return name end
+  return ""
+end
+
+local function readRecipesModern()
+  if not (C_TradeSkillUI and type(C_TradeSkillUI.GetAllRecipeIDs) == "function") then return nil end
+  local ids = try(C_TradeSkillUI.GetAllRecipeIDs)
+  if type(ids) ~= "table" then return nil end
+  local out = {}
+  for _, id in ipairs(ids) do
+    local info = try(C_TradeSkillUI.GetRecipeInfo, id)
+    if type(info) == "table" and info.learned and str(info.name) ~= "" then
+      out[#out + 1] = { id = id, name = info.name }
+    end
+  end
+  return out
+end
+
+local function readRecipesClassic()
+  if type(GetNumTradeSkills) ~= "function" then return nil end
+  local out = {}
+  for i = 1, num(try(GetNumTradeSkills), 0) do
+    local name, kind = try(GetTradeSkillInfo, i)
+    if str(name) ~= "" and kind ~= "header" and kind ~= "subheader" then out[#out + 1] = { name = name } end
+  end
+  return out
+end
+
+-- Enchanting used its own "craft" window in 2004-style clients.
+local function readCraftsClassic()
+  if type(GetNumCrafts) ~= "function" then return nil end
+  local out = {}
+  for i = 1, num(try(GetNumCrafts), 0) do
+    local name, _, kind = try(GetCraftInfo, i)
+    if str(name) ~= "" and kind ~= "header" then out[#out + 1] = { name = name } end
+  end
+  return out
+end
+
+local function recordRecipes(event)
+  pcall(function()
+    if viewingSomeoneElse() then return end -- a linked or guild recipe list isn't this character's
+    local db = initDB()
+    local rec = db.characters[readName()]
+    if type(rec) ~= "table" then return end
+    local prof, list
+    if event == "CRAFT_SHOW" or event == "CRAFT_UPDATE" then
+      prof = str((try(GetCraftDisplaySkillLine)))
+      list = readCraftsClassic()
+    else
+      prof = tradeSkillName()
+      list = readRecipesModern()
+      if type(list) ~= "table" or #list == 0 then list = readRecipesClassic() end
+    end
+    if prof == "" or type(list) ~= "table" or #list == 0 then return end
+    if type(rec.recipes) ~= "table" then rec.recipes = {} end
+    rec.recipes[prof] = list
+  end)
+end
+
+local RECIPE_EVENTS = {
+  TRADE_SKILL_SHOW = true, TRADE_SKILL_LIST_UPDATE = true, TRADE_SKILL_DATA_SOURCE_CHANGED = true,
+  CRAFT_SHOW = true, CRAFT_UPDATE = true, NEW_RECIPE_LEARNED = true,
+}
+
 -- ----------------------------------------------------------------- events --
 
 local frame = CreateFrame and CreateFrame("Frame") or nil
@@ -299,6 +382,7 @@ if frame then
     "PLAYER_TALENT_UPDATE", "ACTIVE_TALENT_GROUP_CHANGED", "CHARACTER_POINTS_CHANGED",
     "PLAYER_GUILD_UPDATE", "GUILD_ROSTER_UPDATE", "PLAYER_LOGOUT",
   }
+  for ev in pairs(RECIPE_EVENTS) do events[#events + 1] = ev end
   for _, ev in ipairs(events) do
     -- An event unknown to this client must not break loading.
     pcall(frame.RegisterEvent, frame, ev)
@@ -315,6 +399,8 @@ if frame then
       elseif event == "PLAYER_GUILD_UPDATE" then
         recordCharacter()
         requestRoster()
+      elseif RECIPE_EVENTS[event] then
+        if loggedIn then recordRecipes(event) end
       elseif event == "PLAYER_LOGOUT" then
         recordCharacter()
       else

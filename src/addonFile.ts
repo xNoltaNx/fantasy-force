@@ -96,7 +96,7 @@ export interface ImportedCharacter {
   race: string
   spec: string
   role: Role
-  professions: { name: string; skill: number; max: number }[]
+  professions: { name: string; skill: number; max: number; recipes?: string[] }[]
   inGuild: boolean
   guild: string
 }
@@ -142,6 +142,19 @@ const text = (v: Lua | undefined): string => (typeof v === 'string' ? v : '')
 const list = (v: Lua | undefined): Lua[] => (Array.isArray(v) ? v : v && typeof v === 'object' ? Object.values(v) : [])
 const rec = (v: Lua | undefined): Record<string, Lua> => (v && typeof v === 'object' && !Array.isArray(v) ? v : {})
 
+/** Recipes come per profession name; each joins its profession, or adds it when the skill list didn't name it. */
+function withRecipes(profs: ImportedCharacter['professions'], recipes: Record<string, Lua>): ImportedCharacter['professions'] {
+  const out = profs.map((p) => ({ ...p }))
+  for (const [name, raw] of Object.entries(recipes)) {
+    const names = [...new Set(list(raw).map((r) => (typeof r === 'string' ? r : text(rec(r).name))).filter(Boolean))].sort()
+    if (!names.length) continue
+    const p = out.find((x) => x.name.toLowerCase() === name.toLowerCase())
+    if (p) p.recipes = names
+    else out.push({ name, skill: 0, max: 0, recipes: names })
+  }
+  return out
+}
+
 export function readAddonFile(src: string): AddonFile {
   const m = /FantasyForceDB\s*=/.exec(src)
   if (!m) throw new Error("This isn't the Fantasy Force addon's file. Look for FantasyForce.lua in WTF\\Account\\<your account>\\SavedVariables.")
@@ -158,8 +171,11 @@ export function readAddonFile(src: string): AddonFile {
       race: c.race ? raceId(text(c.race)) : '',
       spec,
       role: roleFor(cls, spec),
-      professions: list(c.professions).map((p) => rec(p)).filter((p) => text(p.name))
-        .map((p) => ({ name: text(p.name), skill: num(p.skill) ?? 0, max: num(p.max) ?? 0 })),
+      professions: withRecipes(
+        list(c.professions).map((p) => rec(p)).filter((p) => text(p.name))
+          .map((p) => ({ name: text(p.name), skill: num(p.skill) ?? 0, max: num(p.max) ?? 0 })),
+        rec(c.recipes),
+      ),
       inGuild: !!guild,
       guild,
     }

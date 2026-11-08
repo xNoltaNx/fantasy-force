@@ -18,7 +18,11 @@ export function mergeImport(existing: Character[], memberId: string, chars: Impo
       role: keep ? old!.role : c.role,
       is_main: old ? old.is_main : !hasMain && i === 0,
       level: c.level,
-      professions: c.professions,
+      // Recipes only refresh when a profession window is opened in game: keep the site's when the file has none.
+      professions: c.professions.map((p) => {
+        const before = old?.professions.find((x) => x.name === p.name)
+        return p.recipes?.length || !before?.recipes?.length ? p : { ...p, recipes: before.recipes }
+      }),
       note: old?.note ?? '',
     }
   })

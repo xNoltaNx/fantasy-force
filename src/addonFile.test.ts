@@ -18,6 +18,15 @@ FantasyForceDB = {
 				{ ["name"] = "Blacksmithing", ["skill"] = 300, ["max"] = 300, }, -- [1]
 				{ ["name"] = "Mining", ["skill"] = 285, ["max"] = 300, }, -- [2]
 			},
+			["recipes"] = {
+				["Blacksmithing"] = {
+					{ ["id"] = 16988, ["name"] = "Arcanite Reaper", }, -- [1]
+					{ ["name"] = "Lionheart Helm", }, -- [2]
+				},
+				["Cooking"] = {
+					{ ["name"] = "Grilled Squid", }, -- [1]
+				},
+			},
 			["guild"] = "Fantasy Force",
 			["rank"] = "Officer",
 			["updated"] = 1731100000,
@@ -66,7 +75,11 @@ describe('readAddonFile', () => {
     expect(f.characters).toHaveLength(2)
     const g = f.characters.find((c) => c.name === 'Grukka Stonefist')!
     expect(g).toMatchObject({ class_id: 'warrior', race: 'orc', level: 60, spec: 'Protection', role: 'tank', inGuild: true })
-    expect(g.professions).toEqual([{ name: 'Blacksmithing', skill: 300, max: 300 }, { name: 'Mining', skill: 285, max: 300 }])
+    expect(g.professions).toEqual([
+      { name: 'Blacksmithing', skill: 300, max: 300, recipes: ['Arcanite Reaper', 'Lionheart Helm'] },
+      { name: 'Mining', skill: 285, max: 300 },
+      { name: 'Cooking', skill: 0, max: 0, recipes: ['Grilled Squid'] }, // recipes for a skill the list didn't name still arrive
+    ])
     const m = f.characters.find((c) => c.name === 'Mossy Underbridge')!
     expect(m).toMatchObject({ class_id: 'druid', race: 'tauren', spec: 'Feral (cat)', role: 'dps', inGuild: false })
   })

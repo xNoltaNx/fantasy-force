@@ -87,7 +87,7 @@ export function Roster() {
                       <li key={c.id}>
                         <CharLine c={c} race />
                         {c.is_main && <span className="tag">Main</span>}
-                        {c.professions.length > 0 && <div className="muted small">{c.professions.map((p) => `${p.name} ${p.skill}`).join(' · ')}</div>}
+                        {c.professions.length > 0 && <div className="muted small">{c.professions.map((p) => `${p.name} ${p.skill}${p.recipes?.length ? ` (${p.recipes.length} recipes)` : ''}`).join(' · ')}</div>}
                         {c.note && <div className="muted small">{c.note}</div>}
                       </li>
                     ))}

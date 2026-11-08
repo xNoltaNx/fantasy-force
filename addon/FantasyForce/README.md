@@ -6,6 +6,8 @@ A tiny addon for World of Warcraft: Forever that quietly records your characters
 
 Per character on this account: name, level, class, race, faction, spec (the talent tree with the most points) and points per tree, every profession and secondary skill with its skill level, guild and guild rank.
 
+Recipes: the game only lists them while a profession window is open, so open each profession once on each character (and again after learning new ones). Only your own: a linked or guild recipe list is never recorded.
+
 Once a minute at most, when the server sends the guild roster: every member's name, rank, level, class, public note and online status (and days since last online). Officer notes are never read.
 
 ## Where the data lives
