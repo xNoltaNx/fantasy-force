@@ -4,7 +4,11 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <link rel="icon" type="image/png" href="./favicon.png" />
-    <meta name="theme-color" content="#fff6ea" />
+    <meta name="theme-color" content="#1d1524" />
+    <script>
+      // Dark by default; set before the page draws so it never flashes light.
+      document.documentElement.dataset.theme = localStorage.getItem('guild-roster-theme') === 'light' ? 'light' : 'dark'
+    </script>
     <title>Fantasy Force</title>
   </head>
   <body>

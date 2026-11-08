@@ -1,13 +1,11 @@
 import { useState } from 'react'
 
-// Light or dark: the device's own setting until someone picks, then their pick, kept on this device.
+// Light or dark: dark until someone picks light, then their pick, kept on this device.
 const KEY = 'guild-roster-theme'
 type Theme = 'light' | 'dark'
 
 function initial(): Theme {
-  const saved = localStorage.getItem(KEY)
-  if (saved === 'light' || saved === 'dark') return saved
-  return window.matchMedia?.('(prefers-color-scheme: dark)').matches ? 'dark' : 'light'
+  return localStorage.getItem(KEY) === 'light' ? 'light' : 'dark'
 }
 
 /** Set before the first render so the page never flashes the wrong colours. */
