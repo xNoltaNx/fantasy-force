@@ -75,7 +75,7 @@ function Shell() {
         {page === 'events' && <Events />}
         {page === 'availability' && <Availability />}
         {page === 'balance' && <Balance />}
-        {page === 'professions' && <Professions />}
+        {page === 'professions' && <Professions pick={arg} />}
         {page === 'me' && <MyCharacters key={arg ?? 'me'} memberId={arg} />}
         {page === 'officers' && <Officers />}
       </main>
