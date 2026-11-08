@@ -27,10 +27,23 @@ declare global {
   interface Window { $WowheadPower?: { refreshLinks?: () => void } }
 }
 
-/** Wowhead only scans links once; call after new ones render so they get icons too. */
+/** Wowhead only scans links once; call after new ones render so they get icons too. Wowhead's Forever data is
+ *  still filling in (Molten Core's tier sets weren't there on 8 Nov), so a link it found nothing for falls back to
+ *  its Classic data, which has every 2004 item. */
 export function useWowheadRefresh(dep: unknown) {
   useEffect(() => {
     const t = setTimeout(() => window.$WowheadPower?.refreshLinks?.(), 50)
-    return () => clearTimeout(t)
+    const fallback = setTimeout(() => {
+      const missing = [...document.querySelectorAll<HTMLAnchorElement>('a.game-link[data-wowhead*="domain=forever"]')]
+        .filter((a) => !a.querySelector('.iconsmall') && !a.dataset.fallback)
+      if (!missing.length) return
+      for (const a of missing) {
+        a.dataset.fallback = 'classic'
+        a.href = a.href.replace('/forever/', '/classic/')
+        a.dataset.wowhead = (a.dataset.wowhead ?? '').replace('domain=forever', 'domain=classic')
+      }
+      window.$WowheadPower?.refreshLinks?.()
+    }, 3500)
+    return () => { clearTimeout(t); clearTimeout(fallback) }
   }, [dep])
 }
