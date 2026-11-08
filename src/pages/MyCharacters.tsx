@@ -2,9 +2,10 @@ import { useState } from 'react'
 import { useApp } from '../app'
 import { CharLine, charsOf } from '../bits'
 import { store } from '../store'
-import type { Character } from '../types'
+import type { Character, Profession } from '../types'
 import { allTimeZones } from '../week'
-import { CLASSES, classById, roleFor } from '../wow'
+import { CLASSES, classById, MAX_LEVEL, PROFESSIONS, racesFor, roleFor } from '../wow'
+import { AddonImport } from './AddonImport'
 
 /** A member's profile and characters: your own, or anyone's for an officer (#/me/<member id>). */
 export function MyCharacters({ memberId }: { memberId?: string }) {
@@ -26,6 +27,7 @@ export function MyCharacters({ memberId }: { memberId?: string }) {
       )}
       {!mine && <p className="muted">Editing {m.display_name} as an officer.</p>}
       <Profile key={m.id} memberId={m.id} />
+      <AddonImport memberId={m.id} />
 
       <div className="card">
         <div className="card-head">
@@ -37,7 +39,7 @@ export function MyCharacters({ memberId }: { memberId?: string }) {
         <ul className="char-list">
           {chars.map((c) => (
             <li key={c.id} className="char-edit">
-              <CharLine c={c} region={data.guild.region} />
+              <CharLine c={c} race />
               {c.is_main ? <span className="tag">Main</span> : <button className="button ghost small" onClick={() => act(() => store.setMain(m.id, c.id))}>Make main</button>}
               <button className="button ghost small" onClick={() => setEditing(c)}>Edit</button>
               <button className="button ghost small" onClick={() => confirm(`Remove ${c.name}?`) && act(() => store.deleteCharacter(c.id))}>Remove</button>
@@ -76,14 +78,19 @@ function CharacterForm({ memberId, c, done }: { memberId: string; c: Character |
   const hasMain = data.characters.some((x) => x.member_id === memberId && x.is_main)
   const [f, setF] = useState({
     name: c?.name ?? '',
-    realm: c?.realm ?? data.guild.realm,
+    race: c?.race ?? '',
     class_id: c?.class_id ?? 'warrior',
     spec: c?.spec ?? 'Arms',
-    item_level: c?.item_level ?? null as number | null,
+    level: c?.level ?? null as number | null,
+    professions: c?.professions ?? [] as Profession[],
     note: c?.note ?? '',
     is_main: c?.is_main ?? !hasMain,
   })
   const cls = classById(f.class_id)!
+  const setProf = (i: number, p: Partial<Profession> | null) => setF({
+    ...f,
+    professions: p === null ? f.professions.filter((_, j) => j !== i) : f.professions.map((x, j) => (j === i ? { ...x, ...p } : x)),
+  })
 
   const save = async () => {
     if (!f.name.trim()) return
@@ -92,7 +99,8 @@ function CharacterForm({ memberId, c, done }: { memberId: string; c: Character |
       member_id: memberId,
       ...f,
       name: f.name.trim(),
-      realm: f.realm.trim() || data.guild.realm,
+      level: f.level ? Math.min(MAX_LEVEL, Math.max(1, f.level)) : null,
+      professions: f.professions.filter((p) => p.name),
       role: roleFor(f.class_id, f.spec),
     }))
     if (ok) done()
@@ -101,8 +109,14 @@ function CharacterForm({ memberId, c, done }: { memberId: string; c: Character |
   return (
     <div className="form inset">
       <div className="row">
-        <label>Name <input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} autoFocus /></label>
-        <label>Realm <input value={f.realm} onChange={(e) => setF({ ...f, realm: e.target.value })} /></label>
+        <label>Name <input value={f.name} onChange={(e) => setF({ ...f, name: e.target.value })} autoFocus placeholder="First and last name" /></label>
+        <label>Race
+          <select value={f.race} onChange={(e) => setF({ ...f, race: e.target.value })}>
+            <option value="">Not given</option>
+            {racesFor(data.guild.faction).map((r) => <option key={r.id} value={r.id}>{r.name}</option>)}
+          </select>
+        </label>
+        <label>Level <input type="number" min={1} max={MAX_LEVEL} value={f.level ?? ''} onChange={(e) => setF({ ...f, level: e.target.value ? Number(e.target.value) : null })} /></label>
       </div>
       <div className="row">
         <label>Class
@@ -115,9 +129,21 @@ function CharacterForm({ memberId, c, done }: { memberId: string; c: Character |
             {cls.specs.map((s) => <option key={s.name} value={s.name}>{s.name} ({s.role === 'dps' ? 'DPS' : s.role === 'tank' ? 'Tank' : 'Healer'})</option>)}
           </select>
         </label>
-        <label>Item level <input type="number" value={f.item_level ?? ''} onChange={(e) => setF({ ...f, item_level: e.target.value ? Number(e.target.value) : null })} /></label>
       </div>
-      <label>Note (optional) <input value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} placeholder="Off-spec, professions…" /></label>
+      <div className="prof-edit">
+        <span className="prof-edit-label">Professions</span>
+        {f.professions.map((p, i) => (
+          <span className="row" key={i}>
+            <select value={p.name} onChange={(e) => setProf(i, { name: e.target.value })} aria-label="Profession">
+              {[...new Set([p.name, ...PROFESSIONS])].filter(Boolean).map((n) => <option key={n} value={n}>{n}</option>)}
+            </select>
+            <input type="number" min={0} max={300} value={p.skill} onChange={(e) => setProf(i, { skill: Number(e.target.value), max: Math.max(p.max, 75) })} aria-label="Skill" className="skill-input" />
+            <button className="button ghost small" onClick={() => setProf(i, null)}>Remove</button>
+          </span>
+        ))}
+        <button className="button ghost small" onClick={() => setF({ ...f, professions: [...f.professions, { name: PROFESSIONS[0]!, skill: 1, max: 75 }] })}>Add profession</button>
+      </div>
+      <label>Note (optional) <input value={f.note} onChange={(e) => setF({ ...f, note: e.target.value })} placeholder="Off-spec, what you're working toward…" /></label>
       <label className="check"><input type="checkbox" checked={f.is_main} onChange={(e) => setF({ ...f, is_main: e.target.checked })} /> This is the main</label>
       <div className="row">
         <button className="button" onClick={save} disabled={!f.name.trim()}>{c ? 'Save' : 'Add'}</button>

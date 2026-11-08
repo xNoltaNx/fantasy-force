@@ -1,15 +1,22 @@
-# Guild Roster
+# Fantasy Force
 
-A public website for a World of Warcraft guild: who's in it, their mains and alts, events with sign-ups, when everyone plays, and how the classes and roles balance out. Members sign in with Discord to edit their own characters. Officers approve newcomers, set ranks, post events and keep private notes.
+The website of Fantasy Force, a Horde guild in World of Warcraft: Forever: who's in it, their mains and alts, professions, events with sign-ups, when everyone plays, and how the classes and roles balance out. Members sign in with Discord and bring their characters in from the Fantasy Force addon (or add them by hand). Officers approve newcomers, set ranks, post events and keep private notes.
 
 ## Pages
 
-- **Roster:** everyone, with their main and alts, rank and local time. Search and filter by class, role or rank. Each character links to its Armory and Raider.IO pages.
+- **Roster:** everyone, with their main and alts, level, rank, professions and local time. Search and filter by class, role or rank.
+- **Professions:** who has each profession, highest skill first: where to find a crafter.
 - **Events:** raids and other events. Members sign up with a character and a role (Going, Maybe or Can't make it), and each event shows tanks, healers and DPS against what's needed.
 - **Availability:** each member paints the hours they usually play. The guild heat map and the best three-hour raid times show in each viewer's own time zone.
 - **Class balance:** tanks, healers and DPS among mains, how many players can fill each role on any character, and every class's mains and alts.
-- **My characters:** your profile (name, time zone) and characters. Pick one as your main.
-- **Officers:** approve or turn away new sign-ins, set ranks and join dates, keep officer-only notes, edit ranks and guild settings.
+- **My characters:** your profile (name, time zone) and characters. Drop the addon's saved file here to bring every character in, with level, race, spec and professions. Pick one as your main.
+- **Officers:** approve or turn away new sign-ins, set ranks and join dates, keep officer-only notes, see the in-game guild list (and who isn't on the site yet), edit ranks and guild settings.
+
+## The addon
+
+`addon/FantasyForce/` is a small addon for WoW Forever. It records each character you log in on (level, class, race, spec, professions, guild rank) and the guild's in-game roster into its saved file, `World of Warcraft\_forever_\WTF\Account\<ACCOUNT>\SavedVariables\FantasyForce.lua`, written when you log out or type `/reload`. No UI and no network; `/ff` says what it has recorded. It never records officer notes. `addon/example-FantasyForce.lua` is a sample file for trying the import.
+
+**Publishing it on CurseForge** (once): create a CurseForge account and a new WoW project named Fantasy Force, and note its project id. Under the GitHub repo's Settings > Secrets and variables > Actions, add the variable `CF_PROJECT_ID` and the secret `CF_API_KEY` (a CurseForge API token, from your CurseForge account's API tokens page). Then each release is a tag: `git tag addon-v1.0.0 && git push --tags`, and the workflow packages the addon and uploads it, so members' CurseForge app updates it.
 
 ## Try the demo
 

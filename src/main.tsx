@@ -7,6 +7,7 @@ import { Balance } from './pages/Balance'
 import { Events } from './pages/Events'
 import { MyCharacters } from './pages/MyCharacters'
 import { Officers } from './pages/Officers'
+import { Professions } from './pages/Professions'
 import { Roster } from './pages/Roster'
 import { demo, store } from './store'
 import '@fontsource/fredoka/500.css'
@@ -27,6 +28,7 @@ const PAGES = [
   { id: 'roster', name: 'Roster' },
   { id: 'events', name: 'Events' },
   { id: 'availability', name: 'Availability' },
+  { id: 'professions', name: 'Professions' },
   { id: 'balance', name: 'Class balance' },
   { id: 'me', name: 'My characters', signedIn: true },
   { id: 'officers', name: 'Officers', officer: true },
@@ -73,6 +75,7 @@ function Shell() {
         {page === 'events' && <Events />}
         {page === 'availability' && <Availability />}
         {page === 'balance' && <Balance />}
+        {page === 'professions' && <Professions />}
         {page === 'me' && <MyCharacters key={arg ?? 'me'} memberId={arg} />}
         {page === 'officers' && <Officers />}
       </main>

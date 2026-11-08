@@ -1,12 +1,12 @@
 import type { GuildData, Viewer } from '../types'
 import { seedData } from './seed'
-import { viewerFrom, type Store } from './store'
+import { mergeImport, viewerFrom, type Store } from './store'
 
 // The demo: an example guild kept in this browser's storage. "Viewing as" picks who you are, so every
 // view (visitor, member, officer, someone waiting for approval) can be tried without Supabase. It hides
 // what Supabase's row rules would hide, so the demo shows what each person really sees.
 
-const DATA_KEY = 'guild-roster-demo'
+const DATA_KEY = 'guild-roster-demo-forever'
 const VIEWER_KEY = 'guild-roster-demo-viewer'
 
 export class DemoStore implements Store {
@@ -80,6 +80,7 @@ export class DemoStore implements Store {
       characters: d.characters.filter((c) => visible.has(c.member_id)),
       availability: d.availability.filter((a) => visible.has(a.member_id)),
       officerNotes: [],
+      inGame: v?.isApproved ? d.inGame ?? null : null,
     }
   }
 
@@ -163,6 +164,15 @@ export class DemoStore implements Store {
     this.change((d) => {
       d.signups = d.signups.filter((x) => !(x.event_id === eventId && x.member_id === memberId))
     })
+  }
+
+  async importCharacters(memberId: string, chars: Parameters<Store['importCharacters']>[1]) {
+    const rows = mergeImport(this.read().characters.filter((c) => c.member_id === memberId), memberId, chars)
+    for (const r of rows) await this.saveCharacter(r)
+  }
+
+  async saveInGameRoster(r: Parameters<Store['saveInGameRoster']>[0]) {
+    this.change((d) => (d.inGame = r))
   }
 
   async saveOfficerNote(memberId: string, note: string) {

@@ -70,7 +70,7 @@ export function Roster() {
                   <b>{m.display_name}</b>
                   <span className="muted small">{rankName(data, m.rank_id)}</span>
                 </span>
-                <span className="member-main">{main ? <CharLine c={main} region={data.guild.region} links={false} /> : <span className="muted">No characters yet</span>}</span>
+                <span className="member-main">{main ? <CharLine c={main} /> :<span className="muted">No characters yet</span>}</span>
                 <span className="member-alts">
                   {others.map((c) => (
                     <span key={c.id} className="alt-chip" title={`${c.name}: ${c.spec}`}>
@@ -85,9 +85,9 @@ export function Roster() {
                   <ul className="char-list">
                     {chars.map((c) => (
                       <li key={c.id}>
-                        <CharLine c={c} region={data.guild.region} />
+                        <CharLine c={c} race />
                         {c.is_main && <span className="tag">Main</span>}
-                        <span className="muted small"> {c.realm}</span>
+                        {c.professions.length > 0 && <div className="muted small">{c.professions.map((p) => `${p.name} ${p.skill}`).join(' · ')}</div>}
                         {c.note && <div className="muted small">{c.note}</div>}
                       </li>
                     ))}

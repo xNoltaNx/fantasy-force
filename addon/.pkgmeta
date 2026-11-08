@@ -1,0 +1,4 @@
+package-as: FantasyForce
+
+ignore:
+  - README.md

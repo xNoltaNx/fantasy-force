@@ -91,7 +91,7 @@ function EventCard({ e, onEdit }: { e: GuildEvent; onEdit: () => void }) {
                   const c = data.characters.find((x) => x.id === s.character_id)
                   return (
                     <li key={s.member_id}>
-                      {c ? <CharLine c={{ ...c, role: s.role }} region={data.guild.region} links={false} /> : memberName(data, s.member_id)}
+                      {c ? <CharLine c={{ ...c, role: s.role }} /> : memberName(data, s.member_id)}
                       <span className="muted small"> {memberName(data, s.member_id)}</span>
                       {s.comment && <span className="muted small"> · “{s.comment}”</span>}
                     </li>

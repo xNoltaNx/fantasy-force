@@ -16,7 +16,8 @@ create table if not exists public.guild (
   id int primary key default 1 check (id = 1),
   name text not null default 'Fantasy Force',
   region text not null default 'us' check (region in ('us', 'eu', 'kr', 'tw')),
-  realm text not null default '',
+  ruleset text not null default 'RP-PvP', -- WoW Forever: one mega-realm per ruleset and region
+  faction text not null default 'horde' check (faction in ('', 'horde', 'alliance')),
   about text not null default ''
 );
 insert into public.guild (id) values (1) on conflict do nothing;
@@ -46,13 +47,14 @@ create table if not exists public.members (
 create table if not exists public.characters (
   id uuid primary key default gen_random_uuid(),
   member_id uuid not null references public.members on delete cascade,
-  name text not null check (length(name) between 1 and 24),
-  realm text not null default '',
+  name text not null check (length(name) between 1 and 48), -- Forever has first and last names
+  race text not null default '',
   class_id text not null,
   spec text not null,
   role text not null check (role in ('tank', 'healer', 'dps')),
   is_main boolean not null default false,
-  item_level int,
+  level int check (level between 1 and 60),
+  professions jsonb not null default '[]', -- [{name, skill, max}], from the addon or by hand
   note text not null default ''
 );
 create index if not exists characters_member on public.characters (member_id);
@@ -78,6 +80,14 @@ create table if not exists public.events (
   need_healer int not null default 4,
   need_dps int not null default 14,
   created_by uuid references public.members on delete set null default auth.uid()
+);
+
+-- The in-game guild list, as an officer's addon last recorded it (one row). Public notes only: the addon never records officer notes.
+create table if not exists public.ingame_roster (
+  id int primary key default 1 check (id = 1),
+  updated_at timestamptz not null default now(),
+  recorded_by text not null default '',
+  members jsonb not null default '[]' -- [{name, rank, rank_index, level, class_id, note, online, last_online_days}]
 );
 
 create table if not exists public.signups (
@@ -158,12 +168,14 @@ alter table public.availability enable row level security;
 alter table public.officer_notes enable row level security;
 alter table public.events enable row level security;
 alter table public.signups enable row level security;
+alter table public.ingame_roster enable row level security;
 
 grant usage on schema public to anon, authenticated;
 grant select on public.guild, public.ranks, public.members, public.characters, public.availability, public.events, public.signups to anon, authenticated;
 grant insert, update, delete on public.guild, public.ranks, public.members, public.characters, public.availability,
   public.officer_notes, public.events, public.signups to authenticated;
 grant select on public.officer_notes to authenticated;
+grant select, insert, update on public.ingame_roster to authenticated;
 grant usage, select on sequence public.ranks_id_seq to authenticated;
 grant execute on function public.remove_member(uuid) to authenticated;
 
@@ -202,6 +214,12 @@ create policy "write own availability" on public.availability for all
 -- Officer notes: officers only, both ways.
 drop policy if exists "officers only" on public.officer_notes;
 create policy "officers only" on public.officer_notes for all using (public.is_officer()) with check (public.is_officer());
+
+-- In-game guild list: approved members read it (it carries public notes and last-online), officers bring it in.
+drop policy if exists "members read ingame" on public.ingame_roster;
+create policy "members read ingame" on public.ingame_roster for select using (public.is_approved(auth.uid()));
+drop policy if exists "officers write ingame" on public.ingame_roster;
+create policy "officers write ingame" on public.ingame_roster for all using (public.is_officer()) with check (public.is_officer());
 
 -- Events: everyone reads, officers post.
 drop policy if exists "read events" on public.events;

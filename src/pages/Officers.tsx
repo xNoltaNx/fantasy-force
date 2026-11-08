@@ -2,7 +2,8 @@ import { useState } from 'react'
 import { useApp } from '../app'
 import { Avatar, CharLine, charsOf } from '../bits'
 import { store } from '../store'
-import type { Member, Rank } from '../types'
+import type { Guild, Member, Rank } from '../types'
+import { classById, RULESETS } from '../wow'
 
 export function Officers() {
   const { data, viewer } = useApp()
@@ -29,6 +30,7 @@ export function Officers() {
         </div>
       </div>
 
+      <InGameCard />
       <RanksCard ranks={ranks} />
       <GuildCard />
     </section>
@@ -44,7 +46,7 @@ function PendingRow({ m, ranks }: { m: Member; ranks: Rank[] }) {
     <div className="pending">
       <Avatar m={m} />
       <span><b>{m.display_name}</b> <span className="muted small">{m.discord_name}</span></span>
-      <span>{main ? <CharLine c={main} region={data.guild.region} /> : <span className="muted">No characters yet</span>}</span>
+      <span>{main ? <CharLine c={main} race /> :<span className="muted">No characters yet</span>}</span>
       {m.about && <span className="muted small">“{m.about}”</span>}
       <span className="row">
         <select value={rank} onChange={(e) => setRank(Number(e.target.value))} aria-label="Rank">
@@ -67,7 +69,7 @@ function MemberRow({ m, ranks }: { m: Member; ranks: Rank[] }) {
     <div className="officer-row">
       <span className="officer-who">
         <Avatar m={m} size={28} />
-        <span><b>{m.display_name}</b><br />{main ? <CharLine c={main} region={data.guild.region} links={false} /> : <span className="muted small">No characters</span>}</span>
+        <span><b>{m.display_name}</b><br />{main ? <CharLine c={main} /> :<span className="muted small">No characters</span>}</span>
       </span>
       <select value={m.rank_id ?? ''} disabled={isMe} title={isMe ? "You can't change your own rank" : undefined}
         onChange={(e) => act(() => store.updateMember(m.id, { rank_id: Number(e.target.value) }))} aria-label="Rank">
@@ -80,6 +82,48 @@ function MemberRow({ m, ranks }: { m: Member; ranks: Rank[] }) {
         <a className="button ghost small" href={`#/me/${m.id}`}>Characters</a>
         {!isMe && <button className="button ghost small" onClick={() => confirm(`Remove ${m.display_name} from the guild site? Their characters, week and sign-ups go too.`) && act(() => store.removeMember(m.id))}>Remove</button>}
       </span>
+    </div>
+  )
+}
+
+/** The in-game guild list from an officer's addon file, with who isn't on the site yet. */
+function InGameCard() {
+  const { data } = useApp()
+  const [all, setAll] = useState(false)
+  const g = data.inGame
+  if (!g) {
+    return (
+      <div className="card">
+        <h2>In-game guild</h2>
+        <p className="muted">Not brought in yet. On My characters, drop your addon file and press "Update the in-game guild list".</p>
+      </div>
+    )
+  }
+  const onSite = new Set(data.characters.map((c) => c.name.toLowerCase()))
+  const missing = g.members.filter((m) => !onSite.has(m.name.toLowerCase()))
+  const shown = (all ? g.members : missing).slice().sort((a, b) => a.rank_index - b.rank_index || a.name.localeCompare(b.name))
+  const when = new Date(g.updated_at)
+  return (
+    <div className="card">
+      <div className="card-head">
+        <h2>In-game guild <span className="muted small">{g.members.length} characters</span></h2>
+        <div className="segmented">
+          <button className={!all ? 'on' : ''} onClick={() => setAll(false)}>Not on the site ({missing.length})</button>
+          <button className={all ? 'on' : ''} onClick={() => setAll(true)}>Everyone</button>
+        </div>
+      </div>
+      <p className="muted small">Recorded by {g.recorded_by}, {when.toLocaleDateString([], { month: 'short', day: 'numeric' })} at {when.toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' })}.</p>
+      <ul className="ingame-list">
+        {shown.map((m) => (
+          <li key={m.name}>
+            <b className="cls-name" style={{ '--cls': classById(m.class_id)?.color } as React.CSSProperties}>{m.name}</b>
+            <span className="muted small">Level {m.level} {classById(m.class_id)?.name}</span>
+            <span className="small">{m.rank}</span>
+            <span className="muted small">{m.online ? 'Online now' : m.last_online_days != null ? (m.last_online_days === 0 ? 'Today' : m.last_online_days === 1 ? 'Yesterday' : `${m.last_online_days} days ago`) : ''}</span>
+            {m.note && <span className="muted small">“{m.note}”</span>}
+          </li>
+        ))}
+      </ul>
     </div>
   )
 }
@@ -126,7 +170,17 @@ function GuildCard() {
       <h2>Guild</h2>
       <div className="row">
         <label>Name <input value={g.name} onChange={(e) => setG({ ...g, name: e.target.value })} /></label>
-        <label>Home realm <input value={g.realm} onChange={(e) => setG({ ...g, realm: e.target.value })} /></label>
+        <label>Ruleset
+          <select value={g.ruleset} onChange={(e) => setG({ ...g, ruleset: e.target.value })}>
+            {RULESETS.map((r) => <option key={r} value={r}>{r}</option>)}
+          </select>
+        </label>
+        <label>Faction
+          <select value={g.faction} onChange={(e) => setG({ ...g, faction: e.target.value as Guild['faction'] })}>
+            <option value="horde">Horde</option>
+            <option value="alliance">Alliance</option>
+          </select>
+        </label>
         <label>Region
           <select value={g.region} onChange={(e) => setG({ ...g, region: e.target.value })}>
             <option value="us">Americas and Oceania</option>

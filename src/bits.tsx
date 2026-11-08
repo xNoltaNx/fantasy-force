@@ -1,5 +1,5 @@
 import type { Character, GuildData, Member } from './types'
-import { armoryUrl, classById, raiderIoUrl, ROLES, type Role } from './wow'
+import { classById, MAX_LEVEL, raceName, ROLES, type Role } from './wow'
 
 export function RoleIcon({ role }: { role: Role }) {
   const r = ROLES.find((x) => x.id === role)!
@@ -10,20 +10,14 @@ export function ClassName({ c, children }: { c: Pick<Character, 'class_id'>; chi
   return <span className="cls-name" style={{ '--cls': classById(c.class_id)?.color } as React.CSSProperties}>{children}</span>
 }
 
-export function CharLine({ c, region, links = true }: { c: Character; region: string; links?: boolean }) {
+export function CharLine({ c, race = false }: { c: Character; race?: boolean }) {
   const cls = classById(c.class_id)
   return (
     <span className="charline">
       <RoleIcon role={c.role} />
       <ClassName c={c}><b>{c.name}</b></ClassName>
-      <span className="muted"> {c.spec} {cls?.name}</span>
-      {c.item_level ? <span className="ilvl" title="Item level">{c.item_level}</span> : null}
-      {links && (
-        <span className="links">
-          <a href={armoryUrl(region, c.realm, c.name)} target="_blank" rel="noreferrer" title="Armory">Armory</a>
-          <a href={raiderIoUrl(region, c.realm, c.name)} target="_blank" rel="noreferrer" title="Raider.IO">R.IO</a>
-        </span>
-      )}
+      <span className="muted"> {c.spec} {race && c.race ? `${raceName(c.race)} ` : ''}{cls?.name}</span>
+      {c.level ? <span className={`ilvl ${c.level >= MAX_LEVEL ? 'max' : ''}`} title={c.level >= MAX_LEVEL ? 'Max level' : 'Level'}>Level {c.level}</span> : null}
     </span>
   )
 }

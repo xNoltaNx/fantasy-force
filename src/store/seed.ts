@@ -1,4 +1,4 @@
-import type { Availability, Character, GuildData, GuildEvent, Member, Signup } from '../types'
+import type { Availability, Character, GuildData, GuildEvent, InGameRoster, Member, Signup } from '../types'
 import { roleFor } from '../wow'
 
 // Example guild for the demo: made-up players, mains and alts, availability and two events.
@@ -23,24 +23,36 @@ const PLAYERS: [string, string, number, string][] = [
   ['Quill', 'quill.ink', 5, 'America/New_York'],
 ]
 
-// Main then alts: [character name, class id, spec, item level]
-const CHARS: [string, string, string, number][][] = [
-  [['Thornwick', 'warrior', 'Protection', 684], ['Thornheal', 'priest', 'Holy', 662]],
-  [['Maelis', 'priest', 'Discipline', 681], ['Maelstrike', 'rogue', 'Outlaw', 670], ['Maeflame', 'mage', 'Fire', 655]],
-  [['Brakka', 'deathknight', 'Blood', 683], ['Brakkashot', 'hunter', 'Marksmanship', 668]],
-  [['Sunniva', 'paladin', 'Holy', 680], ['Sunclaw', 'druid', 'Feral', 660]],
-  [['Kettle', 'monk', 'Windwalker', 679]],
-  [['Vashir', 'demonhunter', 'Havoc', 682], ['Vashvoke', 'evoker', 'Augmentation', 671], ['Vashtank', 'demonhunter', 'Vengeance', 664]],
-  [['Orla', 'shaman', 'Restoration', 678], ['Orlabolt', 'shaman', 'Elemental', 660]],
-  [['Pip', 'mage', 'Frost', 681]],
-  [['Dunmore', 'warlock', 'Affliction', 677], ['Dunbrew', 'monk', 'Brewmaster', 669]],
-  [['Yseth', 'evoker', 'Preservation', 676]],
-  [['Grell', 'hunter', 'Beast Mastery', 674], ['Grellock', 'warlock', 'Destruction', 652]],
-  [['Marrow', 'deathknight', 'Unholy', 675]],
-  [['Tamsin', 'druid', 'Balance', 673], ['Tamsmite', 'priest', 'Shadow', 650]],
-  [['Hobb', 'rogue', 'Subtlety', 665]],
-  [['Liora', 'demonhunter', 'Devourer', 668]],
-  [['Quill', 'warrior', 'Fury', 663]],
+// Main then alts: [character name (Forever has first and last names), race, class id, spec, level, professions]
+type P = [string, number]
+const CHARS: [string, string, string, string, number, P[]][][] = [
+  [['Grukka Stonefist', 'orc', 'warrior', 'Protection', 60, [['Blacksmithing', 300], ['Mining', 300]]],
+    ['Ashka Stonefist', 'troll', 'priest', 'Holy', 34, [['Tailoring', 165], ['First Aid', 225]]]],
+  [['Morwen Hollowmere', 'undead', 'priest', 'Discipline', 60, [['Alchemy', 300], ['Herbalism', 300]]],
+    ['Silt Hollowmere', 'undead', 'rogue', 'Combat', 47, [['Skinning', 220], ['Leatherworking', 210]]],
+    ['Ember Hollowmere', 'undead', 'mage', 'Fire', 19, [['Enchanting', 90]]]],
+  [['Brakka Ironhide', 'tauren', 'druid', 'Feral (bear)', 60, [['Leatherworking', 300], ['Skinning', 300]]],
+    ['Brakka Longsight', 'orc', 'hunter', 'Marksmanship', 52, [['Engineering', 240], ['Mining', 245]]]],
+  [['Sunniva Windcaller', 'skyborne', 'shaman', 'Restoration', 60, [['Herbalism', 300], ['Alchemy', 295], ['Cooking', 300]]],
+    ['Sunclaw Windcaller', 'tauren', 'druid', 'Feral (cat)', 41, [['Fishing', 180]]]],
+  [['Kettle Brewgut', 'orc', 'hunter', 'Beast Mastery', 60, [['Engineering', 300], ['Mining', 280]]]],
+  [['Vashir Nightshade', 'troll', 'rogue', 'Assassination', 60, [['Alchemy', 260], ['Herbalism', 270]]],
+    ['Vashir Dreadmoor', 'undead', 'warlock', 'Affliction', 38, [['Tailoring', 180]]],
+    ['Vashtusk Grimhorn', 'tauren', 'warrior', 'Protection', 26, [['Mining', 110]]]],
+  [['Orla Tidesong', 'troll', 'shaman', 'Restoration', 60, [['Herbalism', 300], ['First Aid', 300]]],
+    ['Orla Stormcrest', 'skyborne', 'shaman', 'Elemental', 44, [['Enchanting', 200], ['Tailoring', 210]]]],
+  [['Pip Ashwhistle', 'undead', 'mage', 'Frost', 60, [['Tailoring', 300], ['Enchanting', 290]]]],
+  [['Dunmore Blackthorn', 'undead', 'warlock', 'Destruction', 60, [['Tailoring', 285], ['Enchanting', 300]]],
+    ['Dunmore Ruttusk', 'orc', 'warrior', 'Fury', 30, [['Blacksmithing', 140], ['Mining', 150]]]],
+  [['Yseth Moonhoof', 'tauren', 'druid', 'Restoration', 60, [['Herbalism', 300], ['Alchemy', 300]]]],
+  [['Grell Bonechewer', 'troll', 'hunter', 'Survival', 58, [['Skinning', 280], ['Leatherworking', 270]]],
+    ['Grell Hexmoor', 'troll', 'priest', 'Shadow', 27, []]],
+  [['Marrow Gravelkin', 'undead', 'warrior', 'Arms', 60, [['Mining', 300], ['Blacksmithing', 290], ['Fishing', 300]]]],
+  [['Tamsin Duskhorn', 'tauren', 'druid', 'Balance', 56, [['Cooking', 260], ['Fishing', 240]]],
+    ['Tamsin Wraithe', 'undead', 'priest', 'Shadow', 33, [['Tailoring', 160]]]],
+  [['Hobb Quickfingers', 'undead', 'rogue', 'Subtlety', 49, [['Engineering', 205], ['Mining', 215]]]],
+  [['Liora Skywhisper', 'skyborne', 'shaman', 'Enhancement', 42, [['Skinning', 190], ['Leatherworking', 185]]]],
+  [['Quill Redmane', 'orc', 'warrior', 'Fury', 37, [['Mining', 160], ['Blacksmithing', 155]]]],
 ]
 
 // Usual play windows in each player's own evening, as [first local hour, last local hour, weekdays (0=Mon)].
@@ -82,12 +94,31 @@ export function seedData(): GuildData {
     timezone: 'America/New_York', joined_at: new Date().toISOString().slice(0, 10), about: 'Saw your post on the realm forum!' })
 
   const characters: Character[] = []
-  CHARS.forEach((list, i) => list.forEach(([name, classId, spec, ilvl], j) => {
-    characters.push({ id: `c${i + 1}-${j}`, member_id: `m${i + 1}`, name, realm: 'Moon Guard', class_id: classId, spec,
-      role: roleFor(classId, spec), is_main: j === 0, item_level: ilvl, note: '' })
+  CHARS.forEach((list, i) => list.forEach(([name, race, classId, spec, level, profs], j) => {
+    characters.push({ id: `c${i + 1}-${j}`, member_id: `m${i + 1}`, name, race, class_id: classId, spec,
+      role: roleFor(classId, spec), is_main: j === 0, level, note: '',
+      professions: profs.map(([n, skill]) => ({ name: n, skill, max: 300 })) })
   }))
-  characters.push({ id: 'c-new', member_id: 'm-new', name: 'Fenwick', realm: 'Wyrmrest Accord', class_id: 'paladin',
-    spec: 'Protection', role: 'tank', is_main: true, item_level: 640, note: '' })
+  characters.push({ id: 'c-new', member_id: 'm-new', name: 'Fenwick Tallgrass', race: 'tauren', class_id: 'warrior',
+    spec: 'Protection', role: 'tank', is_main: true, level: 51, note: '', professions: [['Mining', 230], ['Blacksmithing', 225]].map(([n, s]) => ({ name: n as string, skill: s as number, max: 300 })) })
+
+  // The in-game guild list, as an officer's addon last saw it: some people aren't on the site yet.
+  const inGame: InGameRoster = {
+    updated_at: new Date(Date.now() - 3 * 3600000).toISOString(),
+    recorded_by: 'Grukka Stonefist',
+    members: [
+      ...characters.filter((c) => c.member_id !== 'm-new').map((c) => {
+        const m = members.find((x) => x.id === c.member_id)!
+        const rankName = ['Guild Master', 'Officer', 'Raider', 'Member', 'Trial'][(m.rank_id ?? 4) - 1]!
+        return { name: c.name, rank: c.is_main ? rankName : 'Alt', rank_index: c.is_main ? (m.rank_id ?? 5) - 1 : 5,
+          level: c.level, class_id: c.class_id, note: c.is_main ? '' : `alt of ${characters.find((x) => x.member_id === c.member_id && x.is_main)!.name.split(' ')[0]}`,
+          online: c.name.startsWith('Pip') || c.name.startsWith('Orla T'), last_online_days: c.is_main ? 0 : 2 }
+      }),
+      { name: 'Zug Bramblehoof', rank: 'Member', rank_index: 3, level: 60, class_id: 'shaman', note: 'returning player', online: false, last_online_days: 1 },
+      { name: 'Krenn Saltfang', rank: 'Member', rank_index: 3, level: 45, class_id: 'mage', note: '', online: true, last_online_days: 0 },
+      { name: 'Nyx Thistlewhip', rank: 'Trial', rank_index: 4, level: 33, class_id: 'warlock', note: 'from trade chat', online: false, last_online_days: 6 },
+    ],
+  }
 
   const availability: Availability[] = members.slice(0, 16).map((m, i) => {
     const [from, to, days] = WINDOWS[i]
@@ -96,10 +127,10 @@ export function seedData(): GuildData {
   })
 
   const events: GuildEvent[] = [
-    { id: 'e1', title: 'Raid night: Heroic progression', starts_at: nextWeekday(2, 19), duration_minutes: 180,
-      description: 'Bring flasks and food. Pulls start at 7:15 sharp.', need_tank: 2, need_healer: 4, need_dps: 14, created_by: 'm1' },
-    { id: 'e2', title: 'Mythic+ push night', starts_at: nextWeekday(5, 20), duration_minutes: 150,
-      description: 'Groups formed in Discord. Alts welcome.', need_tank: 3, need_healer: 3, need_dps: 9, created_by: 'm2' },
+    { id: 'e1', title: 'Molten Core', starts_at: nextWeekday(2, 19), duration_minutes: 180,
+      description: 'Bring fire resistance and flasks. Pulls start at 7:15 sharp.', need_tank: 3, need_healer: 9, need_dps: 28, created_by: 'm1' },
+    { id: 'e2', title: 'Dungeon night: Blackrock Depths', starts_at: nextWeekday(5, 20), duration_minutes: 150,
+      description: 'Groups formed in Discord. Alts and levellers welcome.', need_tank: 2, need_healer: 2, need_dps: 6, created_by: 'm2' },
   ]
 
   const signups: Signup[] = []
@@ -111,7 +142,7 @@ export function seedData(): GuildData {
   signups[6].comment = 'Work trip, sorry!'
 
   return {
-    guild: { name: 'Fantasy Force', region: 'us', realm: 'Moon Guard', about: 'A relaxed raiding guild. Raids Tue and Thu, 7 to 10 pm Pacific.' },
+    guild: { name: 'Fantasy Force', region: 'us', ruleset: 'RP-PvP', faction: 'horde', about: 'A relaxed Horde raiding guild on RP-PvP. Raids Tue and Thu, 7 to 10 pm Pacific.' },
     ranks: [
       { id: 1, name: 'Guild Master', sort: 0, is_officer: true },
       { id: 2, name: 'Officer', sort: 1, is_officer: true },
@@ -122,7 +153,8 @@ export function seedData(): GuildData {
     members, characters, availability, events, signups,
     officerNotes: [
       { member_id: 'm14', note: 'Trial since last month. Solid on mechanics, ask about raid attendance.', updated_at: new Date().toISOString() },
-      { member_id: 'm16', note: 'Great attitude. Gear is a bit behind, help with M+.', updated_at: new Date().toISOString() },
+      { member_id: 'm16', note: 'Great attitude. Still levelling, help with dungeons.', updated_at: new Date().toISOString() },
     ],
+    inGame,
   }
 }

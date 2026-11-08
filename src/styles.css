@@ -223,7 +223,37 @@ input[type='checkbox'] { accent-color: var(--accent); width: 1.05rem; height: 1.
 .officer-row textarea { min-height: 2.1rem; }
 .rank-row { display: flex; gap: 0.6rem; align-items: center; padding: 0.3rem 0; flex-wrap: wrap; }
 
+/* ---------- Addon import ---------- */
+.import { border-style: dashed; }
+.import.over { border-color: var(--accent); background: var(--panel-2); }
+.path { font-family: ui-monospace, Consolas, monospace; background: var(--panel-2); border-radius: 8px; padding: 0.35rem 0.6rem; overflow-wrap: anywhere; }
+.error-line { color: var(--error-ink); background: var(--error-bg); border-radius: 8px; padding: 0.4rem 0.7rem; }
+.done-line { color: var(--good); font-weight: 700; }
+.import-list { list-style: none; padding: 0; margin: 0 0 0.8rem; }
+.import-list li { padding: 0.3rem 0; border-bottom: 1.5px dashed var(--line); }
+.import-list .check { flex-wrap: wrap; gap: 0.4rem; }
+.prof-edit { display: flex; flex-direction: column; gap: 0.4rem; align-items: flex-start; margin-bottom: 0.7rem; }
+.prof-edit-label { font-size: 0.85rem; color: var(--muted); font-weight: 600; }
+.skill-input { width: 5.5rem; }
+.ilvl.max { background: var(--tag-bg); color: var(--tag-ink); }
+
+/* ---------- Professions ---------- */
+.prof-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(19rem, 1fr)); gap: 0.8rem; align-items: start; }
+.prof-card { margin: 0; }
+.prof-card h2 { margin: 0 0 0.5rem; }
+.prof-card ul { list-style: none; padding: 0; margin: 0; }
+.prof-card li { display: grid; grid-template-columns: 1fr 5rem 2.2rem; gap: 0.5rem; align-items: center; padding: 0.2rem 0; }
+.prof-who { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.skill-bar { display: block; height: 7px; background: var(--track); border-radius: 4px; overflow: hidden; }
+.skill-bar span { display: block; height: 100%; background: var(--gold); border-radius: 4px; }
+.skill { text-align: right; font-variant-numeric: tabular-nums; font-weight: 700; font-size: 0.9rem; }
+
+/* ---------- In-game guild ---------- */
+.ingame-list { list-style: none; padding: 0; margin: 0; }
+.ingame-list li { display: grid; grid-template-columns: minmax(12rem, 1.2fr) 9rem 6rem 7rem 1fr; gap: 0.6rem; align-items: baseline; padding: 0.3rem 0; border-bottom: 1.5px dashed var(--line); }
+
 @media (max-width: 760px) {
+  .ingame-list li { grid-template-columns: 1fr 1fr; }
   .logo { width: 150px; height: 150px; }
   .who { position: static; margin-top: 0.6rem; }
   .tabs a { padding: 0.35rem 0.75rem; font-size: 0.98rem; }
