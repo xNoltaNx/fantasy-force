@@ -134,39 +134,119 @@ end
 
 -- ------------------------------------------------------------------ slash --
 
+-- ---------------------------------------------------------------- setters --
+-- The slash commands and the window's controls change settings through these, so they stay in
+-- step; each returns the short line the command prints.
+
 local NAMES = { auto = true, off = true }
 for _, a in ipairs(Accent.ACCENTS) do NAMES[a] = true end
+local SAMPLE = "Hello friend, I am going to the bank with you. Thank you!"
 
-local function describe()
+local function changed()
+  if type(ns.onSettingChanged) == "function" then pcall(ns.onSettingChanged) end
+end
+
+-- Can typed chat be converted in this game (a hook is in and the game hasn't blocked it)?
+local function canConvert()
+  return (hooks.mode == "parse" or hooks.mode == "wrap") and not hooks.blocked
+end
+
+-- One short line: which accent is on, or that it's off.
+local function nowLine()
   local c = charDB()
   local accent, strength = current()
-  local what = c.accent == "auto" and ("auto (" .. accent .. " from your race)") or c.accent
+  if c.accent == "off" then return "accent off." end
+  if accent == "off" then return "accent on (auto), but your race has none: try /accent troll." end
+  return "accent on: " .. accent .. (c.accent == "auto" and " (auto)" or "") .. ", " .. strength .. "."
+end
+
+-- For the window's accent switch: "Troll, thick" or "Off".
+local function shortStatus()
+  local c = charDB()
+  local accent, strength = current()
+  if c.accent == "off" then return "Off" end
+  if accent == "off" then return "Auto: your race has none" end
+  return accent:sub(1, 1):upper() .. accent:sub(2) .. ", " .. strength
+end
+
+-- /accent status: the accent, the chats, and whether chat can be converted here.
+local function statusText()
+  local c = charDB()
   local types = {}
-  for k, v in pairs(c.chatTypes) do if v then types[#types + 1] = k end end
+  for k, v in pairs(c.chatTypes) do if v then types[#types + 1] = k:lower() end end
   table.sort(types)
-  return "accent " .. what .. ", " .. strength .. "; converts " .. table.concat(types, ", ") .. "."
+  local s = nowLine() .. " Chats: " .. table.concat(types, ", ") .. "."
+  if hooks.mode and not canConvert() then
+    s = s .. " This game won't let addons change what you type: /troll <message> and the mail button still work."
+  end
+  return s
+end
+
+-- The sample sentence in the accent now in use (as typed when it's off).
+local function preview()
+  local c = charDB()
+  local accent, strength = current()
+  if c.accent == "off" or accent == "off" then return SAMPLE end
+  return Accent.convert(SAMPLE, accent, strength, { seed = 0 })
+end
+
+local function setAccent(name)
+  local c = charDB()
+  if not NAMES[name] then return nowLine() end
+  if name == "off" and c.accent ~= "off" then c.lastAccent, c.lastStrength = c.accent, c.strength end
+  c.accent = name
+  changed()
+  tellOnceIfUnavailable()
+  return nowLine()
+end
+
+local function setStrength(s)
+  local c = charDB()
+  if s == "light" or s == "thick" then c.strength = s end
+  changed()
+  return nowLine()
+end
+
+local function setChatType(kind, on)
+  local c = charDB()
+  c.chatTypes[str(kind):upper()] = on and true or nil
+  changed()
+  return statusText()
+end
+
+-- /accent with nothing after it: off remembers the accent and strength, on brings them back (the
+-- first time ever: auto, from your race).
+local function toggle()
+  local c = charDB()
+  if c.accent ~= "off" then return setAccent("off") end
+  c.accent = c.lastAccent or "auto"
+  if c.lastStrength then c.strength = c.lastStrength end
+  changed()
+  tellOnceIfUnavailable()
+  return nowLine()
 end
 
 SlashCmdList = SlashCmdList or {}
 SLASH_FANTASYFORCEACCENT1 = "/accent"
 SlashCmdList["FANTASYFORCEACCENT"] = function(msg)
   local ok = pcall(function()
-    local c = charDB()
     msg = str(msg):lower():gsub("^%s+", ""):gsub("%s+$", "")
-    if NAMES[msg] then
-      c.accent = msg
-      print_(describe())
-      tellOnceIfUnavailable()
+    if msg == "" then
+      print_(toggle())
+    elseif NAMES[msg] then
+      print_(setAccent(msg))
     elseif msg == "light" or msg == "thick" then
-      c.strength = msg
-      print_(describe())
+      print_(setStrength(msg))
+    elseif msg == "status" then
+      print_(statusText())
+    elseif msg == "help" then
+      if type(ns.printHelp) == "function" then ns.printHelp("/accent", "/troll") end
     else
       local kind, onoff = msg:match("^chat%s+(%a+)%s+(%a+)$")
       if kind and (onoff == "on" or onoff == "off") then
-        c.chatTypes[kind:upper()] = onoff == "on" or nil
-        print_(describe())
+        print_(setChatType(kind, onoff == "on"))
       else
-        print_(describe() .. " /accent auto|troll|orc|tauren|undead|skyborne|off, /accent light|thick, /accent chat <type> on|off, /troll <message>.")
+        print_("there's no /accent " .. msg .. ": /accent help lists the commands.")
       end
     end
   end)
@@ -183,13 +263,11 @@ SlashCmdList["FANTASYFORCETROLL"] = function(msg, editBox)
       return
     end
     if c.accent == "troll" then
-      c.accent = (c.before and c.before ~= "troll") and c.before or "off"
+      print_(setAccent((c.before and c.before ~= "troll") and c.before or "off"))
     else
       c.before = c.accent
-      c.accent = "troll"
+      print_(setAccent("troll"))
     end
-    print_(describe())
-    tellOnceIfUnavailable()
   end)
   if not ok then print_("something went wrong.") end
 end
@@ -300,10 +378,13 @@ if frame then
         and hooks.mode == "wrap" then
         hooks.blocked = true -- the wrapper now passes everything through untouched
         tellOnceIfUnavailable()
+        changed()
       end
     end)
   end)
 end
 
 -- For the tests.
-ns.AccentChat = { installHooks = installHooks, hooks = hooks, current = current, convertOutgoing = convertOutgoing }
+ns.AccentChat = { installHooks = installHooks, hooks = hooks, current = current, convertOutgoing = convertOutgoing,
+  charDB = charDB, setAccent = setAccent, setStrength = setStrength, setChatType = setChatType, toggle = toggle,
+  statusText = statusText, shortStatus = shortStatus, canConvert = canConvert, preview = preview, SAMPLE = SAMPLE }

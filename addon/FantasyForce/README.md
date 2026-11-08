@@ -16,12 +16,15 @@ Bank alt: after `/ff bankalt` on a character, its bags are recorded on login and
 
 Raids: while you are in a raid group inside a raid instance, one record per raid per day: everyone seen in the raid (checked on entering, on every boss kill and every 10 minutes), each boss kill with who was there, and the loot. Loot is only epic (purple) or better by default; `/ff loot rare` also records rares, `/ff loot epic` goes back. Only the last 60 raids are kept.
 
-## In-game windows
+## The window
 
-Both open anywhere, move by dragging (they remember where you put them) and close with Escape or by typing the command again.
+`/ff` (or the round guild icon on the minimap) opens one window, anywhere. Drag it to move it (it remembers where), Escape or `/ff` closes it. The guild's icon sits on its corner; the header has your character's name (a star on your main) and two small icons: the speech bubble turns your accent on or off (the same as `/accent`), the "i" shows every command. Tabs along the bottom:
 
-- `/ff bank`: the guild bank. One row per item with its icon, name, count and the tab it's in; a search box and a button per tab; the gold and when the bank alt last updated it at the bottom. Hover a row for the item's tooltip; shift-click links it in chat. If you're on the bank alt's account it shows your own record, otherwise the newest one shared by the guild. Nothing yet? The bank alt types `/ff bankalt` and logs in with the addon on.
-- `/ff crafts`: who in the guild can make what. A button per profession (All, Alchemy, Blacksmithing, ...), a search box over recipe names, and one row per recipe with who can make it, online people first (with the green dot). Someone offline whose alt is online shows as "Name (Alt)", and whispering goes to the alt. Hover a row for the item's tooltip plus every crafter and their skill; click a name to whisper them, click the row to whisper the first one online, shift-click to link the item. Your own characters are in it too.
+- **Bank** (`/ff bank`): the guild bank. One row per item with its icon, name, count and tab; a search box and a button per tab; the gold and when the bank alt last updated it. Hover for the item's tooltip; shift-click links it. On the bank alt's account it shows your own record, otherwise the newest one shared by the guild.
+- **Crafting** (`/ff crafts`): who in the guild can make what. A button per profession, a search box, and one row per recipe with who can make it, online people first. Someone offline whose alt is online shows as "Name (Alt)", and whispering goes to the alt. Hover for the item and every crafter's skill; click a name to whisper, click the row to whisper the first one online, shift-click to link.
+- **Guild** (`/ff guild`): everyone running the addon, each main with its alts under it, online players first. Hover for level and professions; click to whisper.
+- **Website** (`/ff site`): three steps to put your characters on the site: 1 Save (reloads, so the game writes the file), 2 the file's path to copy, 3 drop it on My characters at the site's address (to copy). Under them, this account's characters: a star on the main, a warning when a profession's recipes aren't recorded yet (hover: "Open Tailoring once"). Officers also see what else their file carries (guild list, bank, raids).
+- **Options** (`/ff options`): Character (Set main, Bank alt, Minimap button; More: raid loot), Chat (Mains in chat), Accent (the accent, Light or Thick, a one-line preview; More: which chats). Each control does what its command does, and the window follows the commands too.
 
 ## Mains and alts
 
@@ -46,8 +49,9 @@ The windows show what guildmates' addons share over the guild's hidden addon cha
 
 ## Accents
 
-Talk like your race, for fun. Off until you pick one; it's saved per character.
+Talk like your race, for fun. Off until you pick one; it's saved per character. Pick it on the Options tab, or:
 
+- `/accent` turns it on or off, remembering which accent and strength you had (the very first time: your race's). The speech bubble in the window does the same. `/accent status` says what's on and whether this game lets it change chat.
 - `/accent troll` (or `orc`, `tauren`, `undead`, `skyborne`), `/accent auto` (your character's race: Troll, Orc, Tauren, Forsaken, Skyborne; Alliance races stay plain), `/accent off`.
 - `/accent light` swaps a few words; `/accent thick` swaps more and now and then adds a closing line ("Ya mon!", "Lok'tar!", "Walk with the Earth Mother.").
 - It converts what you type in say, yell, guild, officer, party, raid and whispers. `/accent chat <type> on|off` changes the list (e.g. `/accent chat whisper off`). Never channels like Trade.
@@ -89,10 +93,13 @@ Put the `FantasyForce` folder in `World of Warcraft\_forever_\Interface\AddOns\`
 
 ## Commands
 
-- `/ff` prints how many characters, guild members and raids are recorded, how many guildmates' crafters were shared, the last update, and whether this character is a bank alt.
-- `/ff bank` opens the guild bank window; `/ff crafts` opens the guild crafting window.
+`/ff help` prints this list in game; the window's "i" icon shows the same list.
+
+- `/ff` opens or closes the window; `/ff bank`, `/ff crafts`, `/ff guild`, `/ff site`, `/ff options` open it on that tab.
+- `/ff status` prints how many characters, guild members and raids are recorded, how many guildmates' crafters were shared, the last update, and whether this character is a bank alt.
 - `/ff main` makes this character your main in this guild; `/ff tags off|on` hides or shows mains in front of alts in guild chat.
-- `/accent ...` and `/troll ...`: see Accents above.
 - `/ff bankalt` makes this character the guild's bank alt (or turns it off again).
 - `/ff loot rare` records rare (blue) raid loot too; `/ff loot epic` returns to epic only.
+- `/ff minimap off|on` hides or shows the minimap button.
 - `/ff reset` clears everything recorded, and what guildmates shared.
+- `/accent` turns your accent on or off; `/accent status`, `/accent help`, `/accent <name>`, `/accent light|thick`, `/accent chat <type> on|off`, and `/troll ...`: see Accents above.

@@ -2,13 +2,14 @@
 -- FantasyForceDB (SavedVariables) for the Fantasy Force guild website.
 -- Also records the guild bank (or a bank alt's bags and bank), raid attendance and raid loot.
 -- Shares the bank and every member's crafting with guildmates who run the addon (guild addon
--- messages, format in Sync.lua) and shows them in two windows: /ff bank and /ff crafts. Shares
--- each account's mains and alts too, shown in front of guild chat lines and on unit tooltips.
--- Slash commands: /ff, /ff bank, /ff crafts, /ff main, /ff tags off|on, /ff reset, /ff bankalt,
--- /ff loot rare|epic. Accents (/accent, /troll) live in Accent.lua and AccentChat.lua.
+-- messages, format in Sync.lua). Shares each account's mains and alts too, shown in front of guild
+-- chat lines and on unit tooltips. /ff opens one window (and the minimap button toggles it) with
+-- tabs Bank, Crafting, Guild, Website and Options; every command is in COMMANDS (/ff help).
+-- Accents (/accent, /troll) live in Accent.lua and AccentChat.lua.
 -- Plain Lua 5.1; every API call is guarded so a missing function never errors.
 
 local ADDON = "FantasyForce"
+local SITE_URL = "https://xnoltanx.github.io/fantasy-force/" -- the guild website, shown on the Website tab
 local _, ns = ...
 local Sync = type(ns) == "table" and ns.Sync or nil
 local DB_VERSION = 1
@@ -1051,6 +1052,7 @@ end
 
 local function onPayload(p, who)
   local db = initDB()
+  if p.kind ~= "R" then syncState().lastHeard = time() end
   if p.kind == "C" then
     if db.characters[p.subject] then return end -- this account's own: ours is the source
     local c = Sync.decodeCrafter(p.body)
@@ -1068,7 +1070,10 @@ local function onPayload(p, who)
   elseif p.kind == "A" then
     if p.subject == accountId() then return end
     local a = Sync.decodeAccount(p.body)
-    if a and Sync.storeAccount(db.shared.accounts, p.subject, p.updated, a, who, time()) then alts.index = nil end
+    if a and Sync.storeAccount(db.shared.accounts, p.subject, p.updated, a, who, time()) then
+      alts.index = nil
+      if refreshWindows then refreshWindows() end
+    end
   elseif p.kind == "R" then
     local req = Sync.decodeRequest(p.body)
     if req then answerRequest(req, p.subject) end
@@ -1215,7 +1220,6 @@ hookTooltips()
 -- and a footer line. Item and spell names the game hasn't loaded yet fill in when they arrive.
 
 local ROW_H = 20
-local FILTER_TOP = -56
 local QUESTION_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
 local ONLINE_ICON = "|TInterface\\FriendsFrame\\StatusIcon-Online:12:12|t"
 local ui = { windows = {}, onlineAt = 0, redrawQueued = false }
@@ -1356,6 +1360,13 @@ local function newFrame(kind, name, parent, template)
   return nil
 end
 
+-- Shown, and its parents too.
+function ui.visible(f)
+  if type(f) ~= "table" then return false end
+  if type(f.IsVisible) == "function" then return f:IsVisible() and true or false end
+  return f:IsShown() and true or false
+end
+
 local function searchText(w)
   local t = w.search and try(w.search.GetText, w.search)
   return str(t):lower():gsub("^%s+", ""):gsub("%s+$", "")
@@ -1391,16 +1402,8 @@ end
 local function filterButton(w, i)
   local b = w.filterButtons[i]
   if b then return b end
-  b = newFrame("Button", nil, w.frame)
+  b = ui.choiceButton(w.frame, 18)
   if not b then return nil end
-  b:SetHeight(18)
-  b.bg = b:CreateTexture(nil, "BACKGROUND")
-  b.bg:SetAllPoints()
-  b.text = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  b.text:SetPoint("CENTER")
-  local hl = b:CreateTexture(nil, "HIGHLIGHT")
-  hl:SetAllPoints()
-  setColor(hl, 1, 1, 1, 0.12)
   b:SetScript("OnClick", function(self)
     w.filter = self.value
     w.offset = 0
@@ -1412,9 +1415,9 @@ end
 
 -- Rebuilds what the window shows: filters, rows, footer.
 function ui.render(w)
-  if not (w.frame and w.frame:IsShown()) then return end
+  if not (w.frame and ui.visible(w.frame)) then return end
   local data = w.build(w)
-  local names, known = { "All" }, {}
+  local names, known = w.noFilters and {} or { "All" }, {}
   for _, n in ipairs(data.filters) do
     names[#names + 1] = n
     known[n] = true
@@ -1433,26 +1436,19 @@ function ui.render(w)
       if x > 0 and x + bw > maxX then x, y = 0, y + 20 end
       b:SetWidth(bw)
       b:ClearAllPoints()
-      b:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 12 + x, FILTER_TOP - y)
-      -- the picked filter is shown by colour, never a size change
-      if b.value == w.filter then
-        b.text:SetTextColor(1, 0.82, 0)
-        setColor(b.bg, 0.35, 0.27, 0.05, 0.9)
-      else
-        b.text:SetTextColor(0.75, 0.75, 0.75)
-        setColor(b.bg, 0.12, 0.12, 0.12, 0.8)
-      end
+      b:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 6 + x, w.filterTop - y)
+      ui.styleChoice(b, b.value == w.filter)
       b:Show()
       x = x + bw + 4
     end
   end
   for i = #names + 1, #w.filterButtons do w.filterButtons[i]:Hide() end
 
-  local listTop = FILTER_TOP - y - 24
+  local listTop = w.noFilters and (w.filterTop + 2) or (w.filterTop - y - 24)
   w.list:ClearAllPoints()
-  w.list:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 12, listTop)
-  w.list:SetPoint("BOTTOMRIGHT", w.frame, "BOTTOMRIGHT", -28, 30)
-  w.visible = math.max(1, floor((w.height + listTop - 30) / ROW_H))
+  w.list:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 6, listTop)
+  w.list:SetPoint("BOTTOMRIGHT", w.frame, "BOTTOMRIGHT", -24, 24)
+  w.visible = math.max(1, floor((w.height + listTop - 24) / ROW_H))
   w.items = data.rows
   local maxOffset = math.max(0, #w.items - w.visible)
   if w.offset > maxOffset then w.offset = maxOffset end
@@ -1466,8 +1462,10 @@ function ui.render(w)
   if #w.items == 0 then
     w.empty:SetText(data.empty or "")
     w.empty:Show()
+    if w.art then w.art:Show() end
   else
     w.empty:Hide()
+    if w.art then w.art:Hide() end
   end
 end
 
@@ -1502,14 +1500,15 @@ function ui.newRow(w, i)
   return row
 end
 
--- Builds w's frame. Errors (a missing template or method) are caught by the caller.
-function ui.make(w)
-  local name = "FantasyForce" .. w.key .. "Window"
+-- A movable window with a title and a close button, its place remembered under key. Errors (a missing
+-- template or method) are caught by the caller.
+function ui.makeChrome(key, title, width, height)
+  local name = "FantasyForce" .. key
   local f = newFrame("Frame", name, UIParent, "BasicFrameTemplateWithInset")
   local framed = f and (f.CloseButton or f.TitleBg or f.Inset or f.InsetBg) and true or false
   if not framed then
     if not f then f = newFrame("Frame", name .. "B", UIParent, "BackdropTemplate") or newFrame("Frame", name .. "P", UIParent) end
-    if not f then return false end
+    if not f then return nil end
     if f.SetBackdrop then
       pcall(f.SetBackdrop, f, {
         bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
@@ -1525,9 +1524,8 @@ function ui.make(w)
     local close = newFrame("Button", nil, f, "UIPanelCloseButton")
     if close then close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2) end
   end
-  w.frame = f
   f:Hide()
-  f:SetSize(w.width, w.height)
+  f:SetSize(width, height)
   f:SetFrameStrata("HIGH")
   try(f.SetToplevel, f, true)
   try(f.SetClampedToScreen, f, true)
@@ -1541,25 +1539,32 @@ function ui.make(w)
     local point, _, relPoint, x, y = self:GetPoint(1)
     local db = initDB()
     if type(db.windows) ~= "table" then db.windows = {} end
-    db.windows[w.key] = { point = point, relPoint = relPoint, x = x, y = y }
+    db.windows[key] = { point = point, relPoint = relPoint, x = x, y = y }
   end)
-  local pos = type(initDB().windows) == "table" and initDB().windows[w.key]
+  local pos = type(initDB().windows) == "table" and initDB().windows[key]
   f:ClearAllPoints()
   if type(pos) == "table" and type(pos.point) == "string" then
     f:SetPoint(pos.point, UIParent, pos.relPoint or pos.point, num(pos.x, 0), num(pos.y, 0))
   else
-    f:SetPoint("CENTER", UIParent, "CENTER", w.startX or 0, 0)
+    f:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
   end
   if type(UISpecialFrames) == "table" then table.insert(UISpecialFrames, f:GetName() or name) end
+  local t = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  t:SetPoint("TOP", f, "TOP", 0, framed and -5 or -12)
+  t:SetText(title)
+  f:SetScript("OnHide", hideTooltip)
+  return f, framed
+end
 
-  local title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  title:SetPoint("TOP", f, "TOP", 0, framed and -5 or -12)
-  title:SetText(w.title)
-
-  local sb = newFrame("EditBox", name .. "Search", f, "SearchBoxTemplate")
-    or newFrame("EditBox", name .. "SearchInput", f, "InputBoxTemplate")
-  if not sb then
-    sb = newFrame("EditBox", nil, f)
+-- A searchable, filterable, scrolling list inside host (a tab page): the bank, crafting and guild
+-- views are each one of these, filled by their own build, fill, enter and click.
+function ui.makeView(w, host, width, height)
+  w.frame, w.width, w.height, w.filterTop = host, width, height, w.filterTop or -30
+  local name = "FantasyForce" .. w.key
+  local sb = not w.noSearch and (newFrame("EditBox", name .. "Search", host, "SearchBoxTemplate")
+    or newFrame("EditBox", name .. "SearchInput", host, "InputBoxTemplate")) or nil
+  if not sb and not w.noSearch then
+    sb = newFrame("EditBox", nil, host)
     if sb then
       sb:SetFontObject(ChatFontNormal or GameFontHighlightSmall)
       local bg = sb:CreateTexture(nil, "BACKGROUND")
@@ -1569,7 +1574,7 @@ function ui.make(w)
   end
   if sb then
     sb:SetSize(200, 20)
-    sb:SetPoint("TOPLEFT", f, "TOPLEFT", 18, -28)
+    sb:SetPoint("TOPLEFT", host, "TOPLEFT", 12, -4)
     sb:SetAutoFocus(false)
     local function changed()
       w.offset = 0
@@ -1584,11 +1589,11 @@ function ui.make(w)
     w.search = sb
   end
 
-  local list = newFrame("Frame", nil, f)
+  local list = newFrame("Frame", nil, host)
   w.list = list
   try(list.EnableMouseWheel, list, true)
   list:SetScript("OnMouseWheel", function(_, delta) ui.scroll(w, w.offset - delta * 3) end)
-  local sl = newFrame("Slider", nil, f)
+  local sl = newFrame("Slider", nil, host)
   if sl then
     sl:SetOrientation("VERTICAL")
     sl:SetWidth(12)
@@ -1613,17 +1618,27 @@ function ui.make(w)
     w.slider = sl
   end
 
-  w.footer = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-  w.footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 14, 11)
-  w.footer:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 11)
+  w.footer = host:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  w.footer:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 8, 6)
+  w.footer:SetPoint("BOTTOMRIGHT", host, "BOTTOMRIGHT", -8, 6)
   w.footer:SetJustifyH("LEFT")
   w.empty = list:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
   w.empty:SetPoint("CENTER", list, "CENTER", 0, 0)
-  w.empty:SetWidth(w.width - 80)
+  w.empty:SetWidth(width - 80)
+  if w.emptyArt then
+    -- small and soft, above the empty-state words, never behind them
+    w.art = list:CreateTexture(nil, "ARTWORK")
+    w.art:SetSize(96, 96)
+    w.art:SetPoint("BOTTOM", w.empty, "TOP", 0, 12)
+    w.art:SetTexture(w.emptyArt)
+    try(w.art.SetAlpha, w.art, 0.75)
+    w.art:Hide()
+  end
 
   w.rows, w.filterButtons, w.items, w.offset, w.visible = {}, {}, {}, 0, 0
-  f:SetScript("OnShow", function() pcall(ui.render, w) end)
-  f:SetScript("OnHide", hideTooltip)
+  host:SetScript("OnShow", function() pcall(ui.render, w) end)
+  host:SetScript("OnHide", hideTooltip)
+  ui.windows[w.key] = w
   return true
 end
 
@@ -1653,11 +1668,11 @@ local function bankData()
   return own or sh
 end
 
-local bankWindow = { key = "Bank", title = "Fantasy Force: Guild Bank", width = 420, height = 460, nameWidth = 250, startX = -240 }
+local bankWindow = { key = "Bank", nameWidth = 250 }
 
 function bankWindow.build(w)
   local out = { rows = {}, filters = {}, footer = "",
-    empty = "No bank yet: the bank alt types /ff bankalt and logs in with the addon on." }
+    empty = "No bank yet. The bank alt types /ff bankalt." }
   local bank = bankData()
   if not bank then return out end
   local search = searchText(w)
@@ -1769,7 +1784,7 @@ local function recipeName(e)
   return e.id and ("Recipe " .. e.id) or ("Item " .. str(e.item))
 end
 
-local craftsWindow = { key = "Crafts", title = "Fantasy Force: Guild Crafting", width = 580, height = 480, nameWidth = 210, startX = 220 }
+local craftsWindow = { key = "Crafts", nameWidth = 210 }
 
 function craftsWindow.build(w)
   if not ui.crafts then
@@ -1778,7 +1793,7 @@ function craftsWindow.build(w)
   end
   local idx = ui.crafts
   local out = { rows = {}, filters = idx.profs, footer = "",
-    empty = "No crafting yet. Open each profession once on your characters; guildmates' recipes show up when they run FantasyForce too." }
+    empty = "No recipes yet. Open your professions once." }
   local online = onlineNames()
   local search = searchText(w)
   local crafterNames = {}
@@ -1815,7 +1830,7 @@ function craftsWindow.build(w)
   if #idx.list > 0 and #out.rows == 0 then out.empty = "Nothing matches." end
   local nCrafters = 0
   for _ in pairs(crafterNames) do nCrafters = nCrafters + 1 end
-  out.footer = #out.rows .. " recipes, " .. nCrafters .. " crafters.  Click a name to whisper; shift-click links."
+  out.footer = #out.rows .. " recipes, " .. nCrafters .. " crafters"
   return out
 end
 
@@ -1935,7 +1950,7 @@ local function redrawSoon()
   if ui.redrawQueued then return end
   local any = false
   for _, w in pairs(ui.windows) do
-    if w.frame:IsShown() then any = true end
+    if ui.visible(w.frame) then any = true end
   end
   if not any then return end
   ui.redrawQueued = true
@@ -1945,22 +1960,888 @@ local function redrawSoon()
   end)
 end
 
-local function toggleWindow(w)
-  if not ui.windows[w.key] then
-    local ok, made = pcall(ui.make, w)
-    if not ok or not made then
-      print_("couldn't open that window in this game version.")
-      return
+-- ---------------------------------------------------------- website tab --
+-- Getting characters onto the website, three steps of one line each: Save (reloads, so the game writes
+-- the file), the file's path to copy, and the site's address to copy. Under them a checklist of this
+-- account's characters: a star on the main, a warning when a profession's recipes aren't recorded.
+
+-- Gathering skills have no recipes to record; Mining's window is called Smelting.
+local NO_RECIPES = { Herbalism = true, Skinning = true, Fishing = true }
+local RECIPE_WINDOW = { Mining = "Smelting" }
+ui.STAR = "|TInterface\\TargetingFrame\\UI-RaidTargetingIcon_1:14:14|t" -- the main
+ui.WARN = "|TInterface\\DialogFrame\\UI-Dialog-Icon-AlertNew:14:14|t" -- something to do
+local FILE_PATH = "World of Warcraft\\_forever_\\WTF\\Account\\<your account>\\SavedVariables\\FantasyForce.lua"
+
+local siteView = { key = "Site", nameWidth = 300, noFilters = true, noSearch = true, filterTop = -132 }
+
+-- "Open Tailoring once" when a profession's recipes aren't recorded yet, else nil.
+function siteView.hint(p)
+  if p.gather or (p.recipes and p.recipes > 0) then return nil end
+  return "Open " .. (RECIPE_WINDOW[p.name] or p.name) .. " once"
+end
+
+function siteView.build(w)
+  local db, guild = initDB(), myGuild()
+  local out = { rows = {}, filters = {}, footer = "Log in once to add a character.", empty = "No characters yet." }
+  local own = ownAccount()
+  for name, rec in pairs(db.characters) do
+    if type(rec) == "table" then
+      local other = guild == "" or rec.guild ~= guild
+      local r = { name = name, class = str(rec.class), level = num(rec.level, 0), updated = num(rec.updated, 0),
+        other = other, main = not other and own ~= nil and own.main == name, profs = {}, missing = {} }
+      for _, p in ipairs(type(rec.professions) == "table" and rec.professions or {}) do
+        if type(p) == "table" and str(p.name) ~= "" then
+          local list = type(rec.recipes) == "table" and rec.recipes[p.name]
+          local prof = { name = p.name, skill = num(p.skill, 0), gather = NO_RECIPES[p.name] or false,
+            recipes = type(list) == "table" and #list or nil }
+          r.profs[#r.profs + 1] = prof
+          local hint = siteView.hint(prof)
+          if hint then r.missing[#r.missing + 1] = hint end
+        end
+      end
+      out.rows[#out.rows + 1] = r
     end
-    ui.windows[w.key] = w
   end
-  if w.frame:IsShown() then
-    w.frame:Hide()
+  table.sort(out.rows, function(a, b)
+    if a.other ~= b.other then return not a.other end
+    if a.level ~= b.level then return a.level > b.level end
+    return a.name < b.name
+  end)
+  return out
+end
+
+function siteView.fill(w, row, r)
+  local coords = CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[r.class]
+  if type(coords) == "table" then
+    row.icon:SetTexture("Interface\\TargetingFrame\\UI-Classes-Circles")
+    try(row.icon.SetTexCoord, row.icon, coords[1], coords[2], coords[3], coords[4])
+  else
+    row.icon:SetTexture(nil)
+  end
+  row.label:SetText(r.other and ("|cff808080" .. r.name .. "|r") or (classHex(r.class) .. r.name .. "|r"))
+  row.right:SetText((#r.missing > 0 and (ui.WARN .. " ") or "") .. (r.main and (ui.STAR .. " ") or "")
+    .. (r.other and "|cff808080" or "") .. r.level .. (r.other and "|r" or ""))
+end
+
+function siteView.enter(w, row, r)
+  local tt = GameTooltip
+  if not tt then return end
+  try(tt.SetOwner, tt, row, "ANCHOR_RIGHT")
+  try(tt.SetText, tt, r.name)
+  if r.main then try(tt.AddLine, tt, "Main", 1, 0.82, 0) end
+  if r.other then try(tt.AddLine, tt, "Another guild", 0.6, 0.6, 0.6) end
+  try(tt.AddLine, tt, "Level " .. r.level .. ", last recorded " .. ago(r.updated), 1, 1, 1)
+  for _, p in ipairs(r.profs) do
+    local hint = siteView.hint(p)
+    if hint then
+      try(tt.AddLine, tt, p.name .. " " .. p.skill .. ": " .. hint, 1, 0.82, 0)
+    elseif p.gather then
+      try(tt.AddLine, tt, p.name .. " " .. p.skill, 0.6, 0.6, 0.6)
+    else
+      try(tt.AddLine, tt, p.name .. " " .. p.skill .. ": " .. p.recipes .. " recipes", 0.25, 1, 0.25)
+    end
+  end
+  try(tt.Show, tt)
+end
+
+function siteView.click() end
+function siteView.isEmpty() return false end
+
+-- A one-line box holding text to copy: it selects itself and puts the text back if typed over.
+function ui.copyBox(parent, x, y, width, tip)
+  local e = newFrame("EditBox", nil, parent, "InputBoxTemplate") or newFrame("EditBox", nil, parent)
+  if not e then return nil end
+  e:SetSize(width, 20)
+  e:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+  e:SetAutoFocus(false)
+  try(e.SetFontObject, e, GameFontHighlightSmall)
+  e:SetScript("OnTextChanged", function(self, userInput)
+    if userInput and self.value and self:GetText() ~= self.value then
+      self:SetText(self.value)
+      try(self.HighlightText, self)
+    end
+  end)
+  e:SetScript("OnEditFocusGained", function(self) try(self.HighlightText, self) end)
+  e:SetScript("OnMouseUp", function(self) try(self.HighlightText, self) end)
+  e:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  function e.setValue(v)
+    e.value = v
+    e:SetText(v)
+    try(e.SetCursorPosition, e, 0)
+  end
+  ui.tip(e, "Copy", tip)
+  return e
+end
+
+local function isOfficer()
+  if try((C_GuildInfo and C_GuildInfo.CanEditOfficerNote) or CanEditOfficerNote) then return true end
+  local _, _, rankIndex = try(GetGuildInfo, "player")
+  return type(rankIndex) == "number" and rankIndex <= 1
+end
+
+function ui.makeSite(page, width, height)
+  local s = {}
+  ui.site = s
+  local function line(x, y, w, font)
+    local fs = page:CreateFontString(nil, "OVERLAY", font or "GameFontHighlightSmall")
+    fs:SetPoint("TOPLEFT", page, "TOPLEFT", x, y)
+    fs:SetWidth(w)
+    fs:SetJustifyH("LEFT")
+    return fs
+  end
+  line(14, -14, 16, "GameFontNormal"):SetText("1")
+  s.save = ui.button(page, 34, -10, 90, "Save", function()
+    if not try(ReloadUI) then try(C_UI and C_UI.Reload) end
+  end, "Reloads your interface so the game writes the file. It only writes it on reload or logout.")
+  line(14, -44, 16, "GameFontNormal"):SetText("2")
+  s.path = ui.copyBox(page, 40, -40, 530,
+    "The file to upload. Ctrl+C copies. Your account folder is the only one in WTF\\Account, or the one named after your account.")
+  if s.path then s.path.setValue(FILE_PATH) end
+  line(14, -74, 16, "GameFontNormal"):SetText("3")
+  line(34, -76, 150):SetText("Drop it on My characters")
+  s.address = ui.copyBox(page, 190, -70, 380, "The guild website. Ctrl+C copies.")
+  if s.address then s.address.setValue(SITE_URL) end
+  s.officer = line(34, -100, 540, "GameFontDisableSmall")
+  local h = page:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  h:SetPoint("TOPLEFT", page, "TOPLEFT", 12, -116)
+  h:SetText("Characters")
+  ui.makeView(siteView, page, width, height)
+end
+
+function ui.refreshSite()
+  local s = ui.site
+  if not s then return end
+  local db = initDB()
+  if isOfficer() then
+    local parts = { "guild list" }
+    if isBankAlt() then parts[#parts + 1] = "bank" end
+    parts[#parts + 1] = (type(db.raids) == "table" and #db.raids or 0) .. " raids"
+    s.officer:SetText("Also uploads: " .. table.concat(parts, ", "))
+  else
+    s.officer:SetText("")
+  end
+end
+
+-- ------------------------------------------------------------ guild view --
+-- Guildmates running the addon: each main with its alts, online first (from the A payloads).
+
+local guildView = { key = "Guild", nameWidth = 300, noFilters = true,
+  emptyArt = "Interface\\AddOns\\FantasyForce\\Media\\Logo" }
+
+function guildView.build(w)
+  local out = { rows = {}, filters = {}, footer = "", empty = "No guildmates with the addon yet." }
+  local index, online, search = mainIndex(), onlineNames(), searchText(w)
+  local groups, list = {}, {}
+  for name, e in pairs(index) do
+    local g = groups[e.main]
+    if not g then
+      g = { main = e.main, chars = {}, online = false, match = search == "" }
+      groups[e.main] = g
+      list[#list + 1] = g
+    end
+    local c = type(e.char) == "table" and e.char or {}
+    local on = online[name] and true or false
+    g.chars[#g.chars + 1] = { name = name, class = str(c.class), level = num(c.level, 0), profs = c.profs, online = on,
+      isMain = name == e.main, main = e.main, group = g }
+    if on then g.online = true end
+    if not g.match and name:lower():find(search, 1, true) then g.match = true end
+  end
+  table.sort(list, function(a, b)
+    if a.online ~= b.online then return a.online end
+    return a.main < b.main
+  end)
+  local playing = 0
+  for _, g in ipairs(list) do
+    if g.online then playing = playing + 1 end
+    if g.match then
+      table.sort(g.chars, function(a, b)
+        if a.isMain ~= b.isMain then return a.isMain end
+        if a.online ~= b.online then return a.online end
+        if a.level ~= b.level then return a.level > b.level end
+        return a.name < b.name
+      end)
+      for _, c in ipairs(g.chars) do out.rows[#out.rows + 1] = c end
+    end
+  end
+  if #list > 0 and #out.rows == 0 then out.empty = "Nothing matches." end
+  out.footer = #list .. " players, " .. playing .. " online"
+  return out
+end
+
+function guildView.fill(w, row, c)
+  local coords = CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[c.class]
+  if type(coords) == "table" then
+    row.icon:SetTexture("Interface\\TargetingFrame\\UI-Classes-Circles")
+    try(row.icon.SetTexCoord, row.icon, coords[1], coords[2], coords[3], coords[4])
+  else
+    row.icon:SetTexture(nil)
+  end
+  local name = c.online and (classHex(c.class) .. c.name .. "|r") or ("|cff808080" .. c.name .. "|r")
+  row.label:SetText((c.isMain and "" or "      ") .. (c.online and ONLINE_ICON or "") .. name)
+  row.right:SetText(c.level > 0 and tostring(c.level) or "")
+end
+
+function guildView.enter(w, row, c)
+  local tt = GameTooltip
+  if not tt then return end
+  try(tt.SetOwner, tt, row, "ANCHOR_RIGHT")
+  try(tt.SetText, tt, c.name)
+  try(tt.AddLine, tt, c.isMain and "Main" or ("Alt of " .. c.main), 0.55, 0.8, 1)
+  if c.level > 0 then try(tt.AddLine, tt, "Level " .. c.level, 1, 1, 1) end
+  local profs = profText(c)
+  if profs ~= "" then try(tt.AddLine, tt, profs, 0.8, 0.8, 0.8, true) end
+  if c.online then try(tt.AddLine, tt, "Click to whisper", 0.6, 0.6, 0.6) end
+  try(tt.Show, tt)
+end
+
+-- Whispers the character, or whichever of the player's characters is online.
+function guildView.click(w, c)
+  local to = c.online and c.name or nil
+  if not to then
+    for _, o in ipairs(c.group.chars) do
+      if o.online then to = o.name break end
+    end
+  end
+  if to and to ~= readName() then whisper(to) end
+end
+
+function guildView.isEmpty()
+  return next(initDB().shared.accounts) == nil
+end
+
+-- --------------------------------------------------------------- commands --
+
+-- Every slash command, one plain line each. The window's commands list, /ff help and /accent help
+-- all read this list, so they never drift apart.
+local COMMANDS = {
+  { "/ff", "Open or close this window" },
+  { "/ff bank", "Guild bank" },
+  { "/ff crafts", "Who can make what" },
+  { "/ff guild", "Guildmates and their alts" },
+  { "/ff site", "Put your characters on the website" },
+  { "/ff options", "Options" },
+  { "/ff main", "Make this character your main" },
+  { "/ff tags off | on", "Mains in guild chat" },
+  { "/ff bankalt", "This character is the bank alt (or not)" },
+  { "/ff loot rare | epic", "Raid loot to record" },
+  { "/ff minimap off | on", "Minimap button" },
+  { "/ff status", "Summary in chat" },
+  { "/ff help", "This list in chat" },
+  { "/ff reset", "Clear everything recorded" },
+  { "/accent", "Accent on or off" },
+  { "/accent troll | orc | tauren | undead | skyborne | auto | off", "Pick an accent" },
+  { "/accent light | thick", "How strong" },
+  { "/accent chat <type> on | off", "Which chats it changes" },
+  { "/accent status", "Your accent, in chat" },
+  { "/accent help", "Accent commands in chat" },
+  { "/troll", "Troll on or off" },
+  { "/troll <message>", "Say one thing in troll" },
+}
+ui.COMMANDS = COMMANDS
+
+-- The commands starting with any of the prefixes, as lines.
+function ui.commandLines(...)
+  local prefixes, out = { ... }, {}
+  for _, c in ipairs(COMMANDS) do
+    for _, p in ipairs(prefixes) do
+      if c[1] == p or c[1]:sub(1, #p + 1) == p .. " " then
+        out[#out + 1] = "|cffffd100" .. c[1] .. "|r  " .. c[2]
+        break
+      end
+    end
+  end
+  return out
+end
+
+function ui.printHelp(...)
+  for _, line in ipairs(ui.commandLines(...)) do print_(line) end
+end
+
+-- ---------------------------------------------------------------- setters --
+-- A command and its control call the same function, and both leave the window showing the new
+-- state. Each returns the line the command prints; controls print nothing.
+
+local cmd = {}
+local panel = { pages = {}, tabs = {}, W = 600, H = 520,
+  views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView },
+  ICON = "Interface\\AddOns\\FantasyForce\\Media\\Icon",
+  TABS = { { key = "Bank", label = "Bank" }, { key = "Crafts", label = "Crafting" }, { key = "Guild", label = "Guild" },
+    { key = "Site", label = "Website" }, { key = "Options", label = "Options" } } }
+
+-- Something a control shows changed (by a command, a control or the game): show it.
+function ui.changed()
+  if panel.frame and ui.visible(panel.frame) then pcall(panel.refresh) end
+end
+
+function cmd.bankAlt(on)
+  local db = initDB()
+  if type(db.bankAlts) ~= "table" then db.bankAlts = {} end
+  local me = readName()
+  if on == nil then on = not db.bankAlts[me] end
+  if on then
+    db.bankAlts[me] = true
+    recordAltBank(false)
+  else
+    db.bankAlts[me] = nil
+  end
+  ui.changed()
+  if on then return me .. " is now the guild's bank alt: its bags and bank are recorded." end
+  return me .. " is no longer the guild's bank alt."
+end
+
+function cmd.loot(rare)
+  local db = initDB()
+  db.lootQuality = rare and 3 or 4
+  ui.changed()
+  return "raid loot recorded from " .. (rare and "rare (blue)" or "epic (purple)") .. " up."
+end
+
+function cmd.main()
+  local db, guild = initDB(), myGuild()
+  if guild == "" then return "mains are kept per guild: join one first." end
+  if type(db.mains) ~= "table" then db.mains = {} end
+  db.mains[guild] = readName()
+  recordCharacter()
+  onDataChanged()
+  ui.changed()
+  return readName() .. " is now your main in " .. guild .. "."
+end
+
+function cmd.tags(on)
+  local db = initDB()
+  if on then db.tags = nil else db.tags = false end
+  ui.changed()
+  if on then return "guild chat shows a speaker's main in front of their alts." end
+  return "guild chat no longer shows mains in front of alts."
+end
+
+function cmd.minimap(show)
+  local db = initDB()
+  if type(db.minimap) ~= "table" then db.minimap = {} end
+  db.minimap.hide = not show or nil
+  ui.placeMinimap()
+  ui.changed()
+  return show and "the minimap button is back." or "the minimap button is hidden: /ff minimap on brings it back."
+end
+
+-- ----------------------------------------------------------------- window --
+-- /ff: one window, tabs along the bottom (Bank, Crafting, Guild, Website, Options). The guild's round
+-- icon sits on its top-left corner like a portrait. The header has the character's name and two small
+-- icons: the accent switch and the commands list. Short words on every face; the why is in tooltips.
+
+local function accentApi() return type(ns) == "table" and ns.AccentChat or nil end
+
+-- A tooltip on any frame: a title and a line (either may be a function, read when shown).
+function ui.tip(f, title, text)
+  if not f or not title then return end
+  local function enter(self)
+    local tt = GameTooltip
+    if not tt then return end
+    try(tt.SetOwner, tt, self, "ANCHOR_RIGHT")
+    try(tt.SetText, tt, type(title) == "function" and title() or title)
+    local t = type(text) == "function" and text() or text
+    if t then try(tt.AddLine, tt, t, 1, 1, 1, true) end
+    try(tt.Show, tt)
+  end
+  if f.HookScript then
+    f:HookScript("OnEnter", enter)
+    f:HookScript("OnLeave", hideTooltip)
+  else
+    f:SetScript("OnEnter", enter)
+    f:SetScript("OnLeave", hideTooltip)
+  end
+end
+
+-- A small button styled by colour (filters, choices, plain tabs).
+function ui.choiceButton(parent, height)
+  local b = newFrame("Button", nil, parent)
+  if not b then return nil end
+  b:SetHeight(height or 18)
+  b.bg = b:CreateTexture(nil, "BACKGROUND")
+  b.bg:SetAllPoints()
+  b.text = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  b.text:SetPoint("CENTER")
+  local hl = b:CreateTexture(nil, "HIGHLIGHT")
+  hl:SetAllPoints()
+  setColor(hl, 1, 1, 1, 0.12)
+  return b
+end
+
+-- Picked or not, shown by colour, never a size change.
+function ui.styleChoice(b, picked)
+  b.picked = picked and true or false
+  if picked then
+    b.text:SetTextColor(1, 0.82, 0)
+    setColor(b.bg, 0.35, 0.27, 0.05, 0.9)
+  else
+    b.text:SetTextColor(0.75, 0.75, 0.75)
+    setColor(b.bg, 0.12, 0.12, 0.12, 0.8)
+  end
+end
+
+-- A row of choices { value, label, tooltip? }; row.set(value) shows which is picked.
+function ui.choiceRow(parent, x, y, options, onPick)
+  local row, cx = { buttons = {} }, x
+  for i, o in ipairs(options) do
+    local b = ui.choiceButton(parent, 20)
+    if b then
+      b.value = o[1]
+      b.text:SetText(o[2])
+      local bw = num(try(b.text.GetStringWidth, b.text), 40) + 18
+      b:SetWidth(bw)
+      b:SetPoint("TOPLEFT", parent, "TOPLEFT", cx, y)
+      b:SetScript("OnClick", function(self) pcall(onPick, self.value) end)
+      ui.tip(b, o[3] and o[2], o[3])
+      cx = cx + bw + 4
+      row.buttons[i] = b
+    end
+  end
+  function row.set(value)
+    for _, b in ipairs(row.buttons) do ui.styleChoice(b, b.value == value) end
+  end
+  function row.show(on)
+    for _, b in ipairs(row.buttons) do
+      if on then b:Show() else b:Hide() end
+    end
+  end
+  return row
+end
+
+function ui.check(parent, x, y, label, onClick, tip)
+  local cb = newFrame("CheckButton", nil, parent, "UICheckButtonTemplate")
+  if not cb then
+    cb = newFrame("CheckButton", nil, parent)
+    if not cb then return nil end
+    try(cb.SetNormalTexture, cb, "Interface\\Buttons\\UI-CheckBox-Up")
+    try(cb.SetPushedTexture, cb, "Interface\\Buttons\\UI-CheckBox-Down")
+    try(cb.SetHighlightTexture, cb, "Interface\\Buttons\\UI-CheckBox-Highlight", "ADD")
+    try(cb.SetCheckedTexture, cb, "Interface\\Buttons\\UI-CheckBox-Check")
+  end
+  cb:SetSize(24, 24)
+  cb:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+  cb.label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  cb.label:SetPoint("LEFT", cb, "RIGHT", 2, 1)
+  cb.label:SetText(label)
+  cb:SetScript("OnClick", function(self) pcall(onClick, self:GetChecked() and true or false) end)
+  ui.tip(cb, tip and label, tip)
+  return cb
+end
+
+function ui.button(parent, x, y, width, label, onClick, tip)
+  local b = newFrame("Button", nil, parent, "UIPanelButtonTemplate")
+  if b then
+    b:SetText(label)
+  else
+    b = ui.choiceButton(parent, 22)
+    if not b then return nil end
+    b.text:SetText(label)
+    ui.styleChoice(b, false)
+  end
+  b:SetSize(width, 22)
+  b:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+  b:SetScript("OnClick", function() pcall(onClick) end)
+  ui.tip(b, tip and label, tip)
+  return b
+end
+
+-- A small icon button with a tooltip.
+function ui.iconButton(parent, texture, size, title, text, onClick)
+  local b = newFrame("Button", nil, parent)
+  if not b then return nil end
+  b:SetSize(size, size)
+  b.icon = b:CreateTexture(nil, "ARTWORK")
+  b.icon:SetAllPoints()
+  b.icon:SetTexture(texture)
+  local hl = b:CreateTexture(nil, "HIGHLIGHT")
+  hl:SetAllPoints()
+  hl:SetTexture(texture)
+  try(hl.SetBlendMode, hl, "ADD")
+  b:SetScript("OnClick", function(self) pcall(onClick, self) end)
+  ui.tip(b, title, text)
+  return b
+end
+
+-- A small "More" switch folding rarely used controls; its colour shows when it's open.
+function ui.more(parent, x, y, onToggle)
+  local b = ui.choiceButton(parent, 18)
+  if not b then return nil end
+  b.text:SetText("More")
+  b:SetWidth(num(try(b.text.GetStringWidth, b.text), 30) + 16)
+  b:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+  b.open = false
+  ui.styleChoice(b, false)
+  b:SetScript("OnClick", function(self)
+    self.open = not self.open
+    ui.styleChoice(self, self.open)
+    pcall(onToggle, self.open)
+  end)
+  return b
+end
+
+function panel.headerText()
+  local me = readName()
+  if myGuild() == "" then return me end
+  local e = mainIndex()[me]
+  if e and e.main ~= me then return me .. "  |cff8c8c8c(alt of " .. e.main .. ")|r" end
+  return me .. " " .. ui.STAR
+end
+
+local CHAT_LABELS = { { "SAY", "Say" }, { "YELL", "Yell" }, { "GUILD", "Guild" }, { "OFFICER", "Officer" },
+  { "PARTY", "Party" }, { "RAID", "Raid" }, { "WHISPER", "Whisper" } }
+
+function panel.makeOptions(page)
+  local o = {}
+  panel.options = o
+  local function heading(y, text)
+    local h = page:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    h:SetPoint("TOPLEFT", page, "TOPLEFT", 12, y)
+    h:SetText(text)
+  end
+  local function line(x, y, width, font)
+    local fs = page:CreateFontString(nil, "OVERLAY", font or "GameFontHighlightSmall")
+    fs:SetPoint("TOPLEFT", page, "TOPLEFT", x, y)
+    fs:SetWidth(width)
+    fs:SetJustifyH("LEFT")
+    return fs
+  end
+
+  heading(-8, "Character")
+  o.main = line(16, -32, 200)
+  o.setMain = ui.button(page, 220, -27, 90, "Set main", function() cmd.main() end,
+    "Make this character your main in this guild.")
+  o.bankAlt = ui.check(page, 12, -54, "Bank alt", function(on) cmd.bankAlt(on) end,
+    "Share this character's bags and bank as the guild bank.")
+  o.minimap = ui.check(page, 120, -54, "Minimap button", function(on) cmd.minimap(on) end,
+    "A round button on the minimap that opens this window.")
+  o.moreCharacter = ui.more(page, 270, -57, function(open) panel.refreshOptions() end)
+  o.lootLabel = line(16, -86, 70)
+  o.lootLabel:SetText("Raid loot")
+  o.loot = ui.choiceRow(page, 90, -82, { { "rare", "Rare+", "Record rare (blue) raid loot and better." },
+    { "epic", "Epic", "Record epic (purple) raid loot and better." } }, function(v) cmd.loot(v == "rare") end)
+
+  heading(-120, "Chat")
+  o.tags = ui.check(page, 12, -142, "Mains in chat", function(on) cmd.tags(on) end,
+    "Show a guildmate's main in front of what they say on an alt.")
+
+  heading(-180, "Accent")
+  o.accent = ui.choiceRow(page, 16, -202, { { "off", "Off" }, { "auto", "Auto", "Your race's accent." }, { "troll", "Troll" },
+    { "orc", "Orc" }, { "tauren", "Tauren" }, { "undead", "Undead" }, { "skyborne", "Skyborne" } },
+    function(v) local A = accentApi() if A then A.setAccent(v) end end)
+  o.strength = ui.choiceRow(page, 16, -226, { { "light", "Light", "A few words." },
+    { "thick", "Thick", "More words, and now and then a closing line." } },
+    function(v) local A = accentApi() if A then A.setStrength(v) end end)
+  o.moreAccent = ui.more(page, 140, -227, function(open) panel.refreshOptions() end)
+  o.preview = line(16, -254, 556, "GameFontDisableSmall")
+  o.chats = {}
+  for i, c in ipairs(CHAT_LABELS) do
+    o.chats[c[1]] = ui.check(page, 12 + (i - 1) * 78, -276, c[2], function(on)
+      local A = accentApi()
+      if A then A.setChatType(c[1], on) end
+    end)
+  end
+
+  o.status = page:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  o.status:SetPoint("BOTTOMLEFT", page, "BOTTOMLEFT", 12, 8)
+  o.status:SetPoint("BOTTOMRIGHT", page, "BOTTOMRIGHT", -12, 8)
+  o.status:SetJustifyH("LEFT")
+end
+
+local function setChecked(cb, on)
+  if cb then try(cb.SetChecked, cb, on and true or false) end
+end
+
+local function showIf(f, on)
+  if not f then return end
+  if on then f:Show() else f:Hide() end
+end
+
+function panel.refreshOptions()
+  local o = panel.options
+  if not o then return end
+  local db, me, guild = initDB(), readName(), myGuild()
+  local e = mainIndex()[me]
+  if guild == "" then
+    o.main:SetText("Main: no guild")
+  elseif e and e.main ~= me then
+    o.main:SetText("Main: " .. e.main)
+  else
+    o.main:SetText("Main: " .. me .. " " .. ui.STAR)
+  end
+  setChecked(o.bankAlt, isBankAlt())
+  setChecked(o.minimap, not (type(db.minimap) == "table" and db.minimap.hide))
+  local moreChar = o.moreCharacter and o.moreCharacter.open
+  showIf(o.lootLabel, moreChar)
+  o.loot.show(moreChar)
+  o.loot.set(num(db.lootQuality, 4) == 3 and "rare" or "epic")
+  setChecked(o.tags, db.tags ~= false)
+  local A = accentApi()
+  local status = ""
+  if A then
+    local c = A.charDB()
+    o.accent.set(c.accent)
+    o.strength.set(c.strength)
+    o.preview:SetText("\"" .. A.preview() .. "\"")
+    local moreAccent = o.moreAccent and o.moreAccent.open
+    for kind, cb in pairs(o.chats) do
+      setChecked(cb, c.chatTypes[kind])
+      showIf(cb, moreAccent)
+    end
+    if c.accent ~= "off" and not A.canConvert() then status = "Chat can't be changed here: use /troll <message>." end
+  end
+  o.status:SetText(status)
+end
+
+function panel.refresh()
+  if panel.header then panel.header:SetText(panel.headerText()) end
+  local A = accentApi()
+  if panel.accentButton then
+    local on = A and A.charDB().accent ~= "off"
+    try(panel.accentButton.icon.SetDesaturated, panel.accentButton.icon, not on)
+    try(panel.accentButton.icon.SetAlpha, panel.accentButton.icon, on and 1 or 0.45)
+    panel.accentOn = on and true or false
+  end
+  if panel.current == "Options" then panel.refreshOptions() end
+  if panel.current == "Site" then ui.refreshSite() end
+end
+
+function panel.makeTabs(f)
+  local prev
+  for i, t in ipairs(panel.TABS) do
+    local name = "FantasyForceWindowTab" .. i
+    local tab, style = newFrame("Button", name, f, "PanelTabButtonTemplate"), "panel"
+    if not tab then tab, style = newFrame("Button", name, f, "CharacterFrameTabButtonTemplate"), "character" end
+    if not tab then tab, style = ui.choiceButton(f, 22), "plain" end
+    if tab then
+      tab.ffStyle = style
+      try(tab.SetID, tab, i)
+      if style == "plain" then
+        tab.text:SetText(t.label)
+        tab:SetWidth(num(try(tab.text.GetStringWidth, tab.text), 60) + 24)
+      else
+        tab:SetText(t.label)
+        try(PanelTemplates_TabResize, tab, 0)
+      end
+      tab:ClearAllPoints()
+      if prev then
+        tab:SetPoint("LEFT", prev, "RIGHT", style == "character" and -15 or 4, 0)
+      else
+        tab:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 12, style == "plain" and -2 or 2)
+      end
+      tab:SetScript("OnClick", function() pcall(panel.select, t.key) end)
+      panel.tabs[i] = tab
+      prev = tab
+    end
+  end
+  f.Tabs, f.numTabs = panel.tabs, #panel.tabs
+  try(PanelTemplates_SetNumTabs, f, #panel.tabs)
+end
+
+function panel.styleTabs()
+  local idx = 1
+  for i, t in ipairs(panel.TABS) do
+    if t.key == panel.current then idx = i end
+  end
+  local first = panel.tabs[1]
+  if first and first.ffStyle ~= "plain" and type(PanelTemplates_SetTab) == "function"
+    and pcall(PanelTemplates_SetTab, panel.frame, idx) then
     return
   end
-  w.frame:Show()
-  requestRoster()
-  maybeRequest(w.isEmpty())
+  for i, tab in ipairs(panel.tabs) do
+    if tab.bg then ui.styleChoice(tab, i == idx) end
+  end
+end
+
+function panel.make()
+  local f = ui.makeChrome("Window", "Fantasy Force", panel.W, panel.H)
+  if not f then return false end
+  panel.frame = f
+  -- the guild's round icon over the top-left corner, like a portrait
+  local badge = newFrame("Frame", nil, f)
+  if badge then
+    badge:SetSize(60, 60)
+    badge:SetPoint("TOPLEFT", f, "TOPLEFT", -14, 14)
+    try(badge.SetFrameLevel, badge, num(try(f.GetFrameLevel, f), 1) + 10)
+    local icon = badge:CreateTexture(nil, "ARTWORK")
+    icon:SetAllPoints()
+    icon:SetTexture(panel.ICON)
+    panel.badge = icon
+  end
+  panel.header = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  panel.header:SetPoint("TOPLEFT", f, "TOPLEFT", 54, -32)
+  panel.accentButton = ui.iconButton(f, "Interface\\ChatFrame\\UI-ChatIcon-Chat-Up", 22, "Accent",
+    function()
+      local A = accentApi()
+      if not A then return nil end
+      return A.shortStatus() .. (panel.accentOn and "\nClick: off" or "\nClick: on")
+    end,
+    function(self)
+      local A = accentApi()
+      if A then A.toggle() end
+      local onEnter = self:GetScript("OnEnter")
+      if onEnter then onEnter(self) end
+    end)
+  if panel.accentButton then panel.accentButton:SetPoint("TOPRIGHT", f, "TOPRIGHT", -40, -28) end
+  panel.helpButton = ui.iconButton(f, "Interface\\FriendsFrame\\InformationIcon", 18, "Commands", nil, function()
+    if panel.commands then
+      if panel.commands:IsShown() then panel.commands:Hide() else panel.commands:Show() end
+    end
+  end)
+  if panel.helpButton then panel.helpButton:SetPoint("TOPRIGHT", f, "TOPRIGHT", -14, -30) end
+
+  for _, t in ipairs(panel.TABS) do
+    local page = newFrame("Frame", nil, f)
+    page:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -54)
+    page:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 6)
+    page:Hide()
+    panel.pages[t.key] = page
+    local view = panel.views[t.key]
+    if view then
+      ui.makeView(view, page, panel.W - 12, panel.H - 60)
+    elseif t.key == "Site" then
+      ui.makeSite(page, panel.W - 12, panel.H - 60)
+    else
+      panel.makeOptions(page)
+    end
+  end
+
+  -- the commands list behind the help icon, from the same list as /ff help
+  local c = newFrame("Frame", nil, f)
+  if c then
+    c:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -54)
+    c:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 6)
+    try(c.SetFrameLevel, c, num(try(f.GetFrameLevel, f), 1) + 20)
+    try(c.EnableMouse, c, true)
+    local bg = c:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    setColor(bg, 0.04, 0.04, 0.04, 0.96)
+    local h = c:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+    h:SetPoint("TOPLEFT", c, "TOPLEFT", 12, -8)
+    h:SetText("Commands")
+    c.list = c:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    c.list:SetPoint("TOPLEFT", c, "TOPLEFT", 12, -30)
+    c.list:SetWidth(panel.W - 40)
+    c.list:SetJustifyH("LEFT")
+    try(c.list.SetSpacing, c.list, 3)
+    c.list:SetText(table.concat(ui.commandLines("/ff", "/accent", "/troll"), "\n"))
+    c:Hide()
+    panel.commands = c
+  end
+
+  panel.makeTabs(f)
+  f:SetScript("OnShow", function() pcall(panel.refresh) end)
+  return true
+end
+
+function panel.select(key)
+  if not panel.pages[key] then key = "Options" end
+  panel.current = key
+  local db = initDB()
+  if type(db.windows) ~= "table" then db.windows = {} end
+  db.windows.tab = key
+  for k, page in pairs(panel.pages) do
+    if k == key then page:Show() else page:Hide() end
+  end
+  if panel.commands then panel.commands:Hide() end
+  panel.styleTabs()
+  local view = panel.views[key]
+  if view then
+    pcall(ui.render, view)
+    requestRoster()
+    maybeRequest(view.isEmpty())
+  elseif key == "Site" then
+    pcall(ui.render, siteView)
+  end
+  pcall(panel.refresh)
+end
+
+-- Opens the window on a tab (nil: the one last used, Options the first time).
+function panel.open(key)
+  if not panel.frame then
+    local ok, made = pcall(panel.make)
+    if not ok or not made then
+      panel.frame = nil
+      print_("couldn't open the window in this game version.")
+      return false
+    end
+  end
+  panel.frame:Show()
+  local db = initDB()
+  panel.select(key or (type(db.windows) == "table" and db.windows.tab) or "Options")
+  return true
+end
+
+-- Closes the window when it's showing that tab (or any tab, for nil), else opens it there.
+function panel.toggle(key)
+  if panel.frame and ui.visible(panel.frame) and (key == nil or key == panel.current) then
+    panel.frame:Hide()
+    return true
+  end
+  return panel.open(key)
+end
+
+-- -------------------------------------------------------------- minimap --
+-- A plain round button on the minimap's edge: click toggles the window, drag moves it around.
+
+function ui.placeMinimap()
+  local b = ui.minimapButton
+  if not b then return end
+  local db = initDB()
+  if type(db.minimap) ~= "table" then db.minimap = {} end
+  if db.minimap.hide then
+    b:Hide()
+    return
+  end
+  local a = math.rad(num(db.minimap.angle, 200))
+  local r = num(try(Minimap.GetWidth, Minimap), 140) / 2 + 10
+  b:ClearAllPoints()
+  b:SetPoint("CENTER", Minimap, "CENTER", math.cos(a) * r, math.sin(a) * r)
+  b:Show()
+end
+
+local function dragMinimap()
+  local mx, my = try(Minimap.GetCenter, Minimap)
+  local cx, cy = try(GetCursorPosition)
+  if not (mx and my and cx and cy) then return end
+  local s = num(try(Minimap.GetEffectiveScale, Minimap), 1)
+  local atan2 = math.atan2 or math.atan
+  local db = initDB()
+  if type(db.minimap) ~= "table" then db.minimap = {} end
+  db.minimap.angle = math.deg(atan2(cy / s - my, cx / s - mx))
+  ui.placeMinimap()
+end
+
+function ui.makeMinimap()
+  if ui.minimapButton or not Minimap then
+    ui.placeMinimap()
+    return
+  end
+  local b = newFrame("Button", "FantasyForceMinimapButton", Minimap)
+  if not b then return end
+  b:SetSize(31, 31)
+  b:SetFrameStrata("MEDIUM")
+  try(b.SetFrameLevel, b, 8)
+  local bg = b:CreateTexture(nil, "BACKGROUND")
+  bg:SetTexture("Interface\\Minimap\\UI-Minimap-Background")
+  bg:SetSize(20, 20)
+  bg:SetPoint("TOPLEFT", b, "TOPLEFT", 7, -5)
+  local icon = b:CreateTexture(nil, "ARTWORK")
+  icon:SetTexture(panel.ICON)
+  icon:SetSize(20, 20)
+  icon:SetPoint("TOPLEFT", b, "TOPLEFT", 6, -5)
+  b.icon = icon
+  local border = b:CreateTexture(nil, "OVERLAY")
+  border:SetTexture("Interface\\Minimap\\MiniMap-TrackingBorder")
+  border:SetSize(53, 53)
+  border:SetPoint("TOPLEFT", b, "TOPLEFT", 0, 0)
+  try(b.SetHighlightTexture, b, "Interface\\Minimap\\UI-Minimap-ZoomButton-Highlight")
+  try(b.RegisterForClicks, b, "LeftButtonUp")
+  b:RegisterForDrag("LeftButton")
+  b:SetScript("OnClick", function() pcall(panel.toggle, nil) end)
+  b:SetScript("OnDragStart", function(self) self:SetScript("OnUpdate", function() pcall(dragMinimap) end) end)
+  b:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
+  ui.tip(b, "Fantasy Force", "Click: open. Drag: move.")
+  ui.minimapButton = b
+  ui.placeMinimap()
 end
 
 -- ----------------------------------------------------------------- events --
@@ -1992,6 +2873,7 @@ if frame then
       if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         loggedIn = true
         onLogin()
+        pcall(ui.makeMinimap)
         recordCharacter()
         requestRoster()
         startTicker()
@@ -2048,92 +2930,79 @@ end
 
 -- ---------------------------------------------------------------- slash ----
 
+-- The text summary /ff used to print, now /ff status.
+function ui.printSummary()
+  local db = initDB()
+  local chars = 0
+  local latest = 0
+  for _, c in pairs(db.characters) do
+    chars = chars + 1
+    if type(c) == "table" and num(c.updated, 0) > latest then latest = c.updated end
+  end
+  local members, gupd = 0, 0
+  if type(db.guild) == "table" then
+    members = type(db.guild.members) == "table" and #db.guild.members or 0
+    gupd = num(db.guild.updated, 0)
+    if gupd > latest then latest = gupd end
+  end
+  local last = latest > 0 and date("%Y-%m-%d %H:%M", latest) or "never"
+  local raids = type(db.raids) == "table" and #db.raids or 0
+  local shared = 0
+  for _ in pairs(db.shared.crafters) do shared = shared + 1 end
+  print_(chars .. " characters, " .. members .. " guild members, " .. raids .. " raids, "
+    .. shared .. " guildmates' crafters shared, last update " .. last
+    .. ". " .. (isBankAlt() and "This character is a bank alt." or "Not a bank alt (/ff bankalt).")
+    .. " /ff opens the window; /ff help lists every command."
+    .. " Saved on logout or /reload. /ff reset clears.")
+end
+
+-- /ff words that open the window on a tab.
+local TAB_COMMANDS = { bank = "Bank", crafts = "Crafts", craft = "Crafts", crafting = "Crafts", guild = "Guild",
+  site = "Site", website = "Site", options = "Options" }
+
 SLASH_FANTASYFORCE1 = "/ff"
 SlashCmdList = SlashCmdList or {}
 SlashCmdList["FANTASYFORCE"] = function(msg)
   local ok = pcall(function()
-    local db = initDB()
     msg = str(msg):lower():gsub("^%s+", ""):gsub("%s+$", "")
-    if msg == "reset" then
+    if msg == "" then
+      if not panel.toggle(nil) then ui.printSummary() end
+    elseif TAB_COMMANDS[msg] then
+      panel.toggle(TAB_COMMANDS[msg])
+    elseif msg == "status" then
+      ui.printSummary()
+    elseif msg == "help" then
+      ui.printHelp("/ff", "/accent", "/troll")
+    elseif msg == "reset" then
       FantasyForceDB = nil
       initDB()
       lastGuildRecord = 0
       lastRosterRequest = 0
       recordCharacter()
       if refreshWindows then refreshWindows() end
+      ui.changed()
       print_("data cleared (this character re-recorded).")
-      return
+    elseif msg == "bankalt" then
+      print_(cmd.bankAlt())
+    elseif msg == "loot rare" or msg == "loot epic" then
+      print_(cmd.loot(msg == "loot rare"))
+    elseif msg == "main" then
+      print_(cmd.main())
+    elseif msg == "tags on" or msg == "tags off" then
+      print_(cmd.tags(msg == "tags on"))
+    elseif msg == "minimap on" or msg == "minimap off" then
+      print_(cmd.minimap(msg == "minimap on"))
+    else
+      print_("there's no /ff " .. msg .. ": /ff help lists the commands.")
     end
-    if msg == "bankalt" then
-      if type(db.bankAlts) ~= "table" then db.bankAlts = {} end
-      local me = readName()
-      if db.bankAlts[me] then
-        db.bankAlts[me] = nil
-        print_(me .. " is no longer the guild's bank alt.")
-      else
-        db.bankAlts[me] = true
-        print_(me .. " is now the guild's bank alt: its bags and bank are recorded.")
-        recordAltBank(false)
-      end
-      return
-    end
-    if msg == "loot rare" or msg == "loot epic" then
-      db.lootQuality = msg == "loot rare" and 3 or 4
-      print_("raid loot recorded from " .. (db.lootQuality == 3 and "rare (blue)" or "epic (purple)") .. " up.")
-      return
-    end
-    if msg == "main" then
-      local guild = myGuild()
-      if guild == "" then
-        print_("mains are kept per guild: join one first.")
-        return
-      end
-      if type(db.mains) ~= "table" then db.mains = {} end
-      db.mains[guild] = readName()
-      recordCharacter()
-      onDataChanged()
-      print_(readName() .. " is now your main in " .. guild .. ".")
-      return
-    end
-    if msg == "tags off" or msg == "tags on" then
-      if msg == "tags on" then db.tags = nil else db.tags = false end
-      print_(db.tags == false and "guild chat no longer shows mains in front of alts." or "guild chat shows a speaker's main in front of their alts.")
-      return
-    end
-    if msg == "bank" then
-      toggleWindow(bankWindow)
-      return
-    end
-    if msg == "crafts" or msg == "craft" or msg == "crafting" then
-      toggleWindow(craftsWindow)
-      return
-    end
-    local chars = 0
-    local latest = 0
-    for _, c in pairs(db.characters) do
-      chars = chars + 1
-      if type(c) == "table" and num(c.updated, 0) > latest then latest = c.updated end
-    end
-    local members, gupd = 0, 0
-    if type(db.guild) == "table" then
-      members = type(db.guild.members) == "table" and #db.guild.members or 0
-      gupd = num(db.guild.updated, 0)
-      if gupd > latest then latest = gupd end
-    end
-    local last = latest > 0 and date("%Y-%m-%d %H:%M", latest) or "never"
-    local raids = type(db.raids) == "table" and #db.raids or 0
-    local shared = 0
-    for _ in pairs(db.shared.crafters) do shared = shared + 1 end
-    print_(chars .. " characters, " .. members .. " guild members, " .. raids .. " raids, "
-      .. shared .. " guildmates' crafters shared, last update " .. last
-      .. ". " .. (isBankAlt() and "This character is a bank alt." or "Not a bank alt (/ff bankalt).")
-      .. " /ff bank and /ff crafts open the guild bank and crafting windows; /ff main makes this character your main."
-      .. " Saved on logout or /reload. /ff reset clears.")
   end)
   if not ok then print_("something went wrong.") end
 end
 
--- For Accent.lua's game side (AccentChat.lua), loaded after this file.
+-- For AccentChat.lua (loaded after this file) and the tests.
 if type(ns) == "table" then
   ns.try, ns.str, ns.print, ns.after = try, str, print_, after
+  ns.printHelp, ns.onSettingChanged = ui.printHelp, ui.changed
+  ns.ff = { ui = ui, panel = panel, cmd = cmd,
+    views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView, Site = siteView } }
 end

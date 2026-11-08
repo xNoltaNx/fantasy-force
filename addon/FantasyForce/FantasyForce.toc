@@ -1,11 +1,11 @@
 ## Interface: 16001
 ## Title: Fantasy Force
-## Notes: Records your characters and guild roster for the Fantasy Force guild website, shows the guild bank and guildmates' crafting anywhere (/ff bank, /ff crafts), mains in front of alts in guild chat, and talks in your race's accent (/accent).
+## Notes: The Fantasy Force guild window (/ff): guild bank, crafting, guildmates and their alts, the website, and accents.
 ## Author: Fantasy Force
 ## Version: @project-version@
 ## SavedVariables: FantasyForceDB
 ## SavedVariablesPerCharacter: FantasyForceCharDB
-## IconTexture: Interface\Icons\INV_Misc_Book_09
+## IconTexture: Interface\AddOns\FantasyForce\Media\Icon
 
 Sync.lua
 Accent.lua
