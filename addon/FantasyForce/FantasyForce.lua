@@ -2,8 +2,10 @@
 -- FantasyForceDB (SavedVariables) for the Fantasy Force guild website.
 -- Also records the guild bank (or a bank alt's bags and bank), raid attendance and raid loot.
 -- Shares the bank and every member's crafting with guildmates who run the addon (guild addon
--- messages, format in Sync.lua) and shows them in two windows: /ff bank and /ff crafts.
--- Slash commands: /ff, /ff bank, /ff crafts, /ff reset, /ff bankalt, /ff loot rare|epic.
+-- messages, format in Sync.lua) and shows them in two windows: /ff bank and /ff crafts. Shares
+-- each account's mains and alts too, shown in front of guild chat lines and on unit tooltips.
+-- Slash commands: /ff, /ff bank, /ff crafts, /ff main, /ff tags off|on, /ff reset, /ff bankalt,
+-- /ff loot rare|epic. Accents (/accent, /troll) live in Accent.lua and AccentChat.lua.
 -- Plain Lua 5.1; every API call is guarded so a missing function never errors.
 
 local ADDON = "FantasyForce"
@@ -54,6 +56,7 @@ local function initDB()
   -- what guildmates' addons shared (see the sharing section)
   if type(db.shared) ~= "table" then db.shared = {} end
   if type(db.shared.crafters) ~= "table" then db.shared.crafters = {} end
+  if type(db.shared.accounts) ~= "table" then db.shared.accounts = {} end
   return db
 end
 
@@ -742,6 +745,7 @@ local share = {
   changeGen = 0, registered = false, loginDone = false, timers = {},
 }
 local refreshWindows -- set in the windows section
+local alts = { index = nil } -- mains and alts: the index is rebuilt when what it's made of changes
 
 local function clock()
   local t = try(GetTime)
@@ -832,7 +836,15 @@ local function enqueue(kind, subject, updated, body, delay, answer, done)
   for i = #q, 1, -1 do
     local j = q[i]
     if j.kind == kind and j.subject == subject then
-      if j.updated >= updated then return end
+      if j.updated >= updated then
+        if j.updated == updated and not answer then
+          -- a push for what's already queued as an answer: it's a push now (never dropped) and
+          -- still records that it went out
+          j.answer = false
+          j.done = j.done or done
+        end
+        return
+      end
       if not j.msgs then table.remove(q, i) end -- an older version not started yet
     end
   end
@@ -928,6 +940,34 @@ local function ownBank()
   return b, Sync.encodeBank(b)
 end
 
+-- This account's random id, made once: the subject of its A payloads, so a new main replaces the old.
+local function accountId()
+  local st = syncState()
+  if type(st.accountId) ~= "string" or st.accountId == "" then
+    st.accountId = Sync.b36(time()) .. Sync.b36(floor(rand(0, 1) * 2000000000))
+  end
+  return st.accountId
+end
+
+-- This account's characters in this guild and its main, with the version last shared (stamped anew
+-- when they change: a level, a profession, a new main).
+local function ownAccount()
+  local guild = myGuild()
+  if guild == "" or not Sync then return nil end
+  local db, st = initDB(), syncState()
+  local a = Sync.accountFromCharacters(db.characters, guild, type(db.mains) == "table" and db.mains[guild] or nil)
+  if not a then return nil end
+  local sig = Sync.encodeAccount(a)
+  local v = st.ownAccount
+  if type(v) ~= "table" or v.sig ~= sig then
+    local stamp = time()
+    if type(v) == "table" and num(v.updated, 0) >= stamp then stamp = v.updated + 1 end
+    v = { updated = stamp, sig = sig }
+    st.ownAccount = v
+  end
+  return a, v, sig
+end
+
 -- Sends what changed since it was last sent.
 local function shareOwn()
   if not canShare() then return end
@@ -941,6 +981,10 @@ local function shareOwn()
   local b, body = ownBank()
   if b and st.bankSent ~= body then
     enqueue("B", str(b.by), num(b.updated, time()), body, 0, false, function() st.bankSent = body end)
+  end
+  local a, v, abody = ownAccount()
+  if a and v.sent ~= v.updated then
+    enqueue("A", accountId(), v.updated, abody, 0, false, function() v.sent = v.updated end)
   end
 end
 
@@ -966,6 +1010,15 @@ local function answerRequest(req, asker)
   elseif sb and num(sb.updated, 0) > num(req.bank, 0) then
     enqueue("B", str(sb.by), sb.updated, Sync.encodeBank(sb), rand(4, 12), true)
   end
+  local stamps = req.accounts or {}
+  local a, v, abody = ownAccount()
+  local me = accountId()
+  if a and v.updated > num(stamps[me], 0) then enqueue("A", me, v.updated, abody, rand(1, 3), true) end
+  for id, acct in pairs(db.shared.accounts) do
+    if id ~= me and type(acct) == "table" and num(acct.updated, 0) > num(stamps[id], 0) then
+      enqueue("A", id, acct.updated, Sync.encodeAccount(acct), rand(4, 12), true)
+    end
+  end
 end
 
 -- Asks the guild for anything newer than what this client holds.
@@ -980,8 +1033,14 @@ local function sendRequest()
   local bankStamp = type(db.shared.bank) == "table" and num(db.shared.bank.updated, 0) or 0
   local b = ownBank()
   if b and num(b.updated, 0) > bankStamp then bankStamp = num(b.updated, 0) end
+  local accounts = {}
+  for id, acct in pairs(db.shared.accounts) do
+    if type(acct) == "table" then accounts[id] = num(acct.updated, 0) end
+  end
+  local _, v = ownAccount()
+  if v then accounts[accountId()] = v.updated end
   st.lastRequest = time()
-  enqueue("R", readName(), time(), Sync.encodeRequest(bankStamp, stamps), 0, false)
+  enqueue("R", readName(), time(), Sync.encodeRequest(bankStamp, stamps, accounts), 0, false)
 end
 
 -- A window opened: ask at most once an hour (every 5 minutes while there's nothing to show).
@@ -1006,6 +1065,10 @@ local function onPayload(p, who)
       db.shared.bank = stored
       if refreshWindows then refreshWindows() end
     end
+  elseif p.kind == "A" then
+    if p.subject == accountId() then return end
+    local a = Sync.decodeAccount(p.body)
+    if a and Sync.storeAccount(db.shared.accounts, p.subject, p.updated, a, who, time()) then alts.index = nil end
   elseif p.kind == "R" then
     local req = Sync.decodeRequest(p.body)
     if req then answerRequest(req, p.subject) end
@@ -1036,6 +1099,7 @@ local function onAddonMessage(prefix, text, channel, sender)
 end
 
 onDataChanged = function()
+  alts.index = nil
   share.changeGen = share.changeGen + 1
   local gen = share.changeGen
   after(CHANGE_DELAY, function()
@@ -1049,12 +1113,101 @@ local function onLogin()
   if share.loginDone then return end
   share.loginDone = true
   after(rand(5, 20), function()
-    if Sync then Sync.prune(initDB().shared.crafters, time(), CRAFTER_MAX_AGE) end
+    if Sync then
+      Sync.prune(initDB().shared.crafters, time(), CRAFTER_MAX_AGE)
+      Sync.prune(initDB().shared.accounts, time(), CRAFTER_MAX_AGE)
+    end
+    alts.index = nil
     shareOwn()
   end)
+  -- mains and alts are wanted without opening a window; asked once a guild logging in together has
+  -- pushed what it has, so answers only fill real gaps
+  after(rand(40, 70), function() maybeRequest(false) end)
 end
 
 registerPrefix()
+
+-- ---------------------------------------------------------- mains and alts --
+-- Each account shares its characters in the guild and which is its main (A payloads above). Guild
+-- chat shows a speaker's main in front of what they say on an alt: "(Morwen) hi". Only what this
+-- client shows changes; the message itself is never touched. Unit tooltips say "Alt of Morwen" or
+-- "Alts: ...", and the professions. FantasyForceDB.mainOf (every known character to its main) is
+-- kept for the website.
+
+-- { [characterName] = { main, account, alts, char } }: guildmates' accounts plus this one.
+local function mainIndex()
+  if alts.index then return alts.index end
+  local db = initDB()
+  local accounts = {}
+  for id, a in pairs(db.shared.accounts) do accounts[id] = a end
+  local own = ownAccount()
+  if own then accounts[accountId()] = { updated = math.huge, main = own.main, chars = own.chars } end
+  local index = Sync and Sync.mainIndex(accounts) or {}
+  local mainOf = {}
+  for name, e in pairs(index) do mainOf[name] = e.main end
+  db.mainOf = mainOf
+  alts.index = index
+  return index
+end
+
+-- A chat message filter: (Main) in front of a line said on an alt.
+local function guildChatFilter(_, _, msg, author, ...)
+  if initDB().tags == false then return false end
+  local ok, tagged = pcall(function()
+    local name = stripRealm(author)
+    local e = mainIndex()[name]
+    if e and e.main ~= name and e.main ~= "" then return "(" .. e.main .. ") " .. msg end
+  end)
+  if ok and tagged then return false, tagged, author, ... end
+  return false
+end
+
+local function registerChatFilters()
+  local add = (ChatFrameUtil and ChatFrameUtil.AddMessageEventFilter) or ChatFrame_AddMessageEventFilter
+  if type(add) ~= "function" then return end
+  pcall(add, "CHAT_MSG_GUILD", guildChatFilter)
+  pcall(add, "CHAT_MSG_OFFICER", guildChatFilter)
+end
+
+local function profText(c)
+  local parts = {}
+  for _, p in ipairs(type(c) == "table" and c.profs or {}) do parts[#parts + 1] = p.name .. " " .. num(p.skill, 0) end
+  return table.concat(parts, ", ")
+end
+
+-- Adds the main or alts and the professions to a guild member's unit tooltip.
+local function unitTooltip(tt)
+  pcall(function()
+    local _, unit = tt:GetUnit()
+    if not unit or not try(UnitIsPlayer, unit) then return end
+    local name = stripRealm(str((try(UnitName, unit))))
+    local e = name ~= "" and mainIndex()[name]
+    if not e then return end
+    if e.main ~= name then
+      tt:AddLine("Alt of " .. e.main, 0.55, 0.8, 1)
+    elseif #e.alts > 0 then
+      local list = {}
+      for _, c in ipairs(e.alts) do list[#list + 1] = c.name .. " (" .. num(c.level, 0) .. ")" end
+      tt:AddLine("Alts: " .. table.concat(list, ", "), 0.55, 0.8, 1, true)
+    end
+    local profs = profText(e.char)
+    if profs ~= "" then tt:AddLine(profs, 0.8, 0.8, 0.8, true) end
+    tt:Show()
+  end)
+end
+
+local function hookTooltips()
+  local T = TooltipDataProcessor
+  local unitType = Enum and Enum.TooltipDataType and Enum.TooltipDataType.Unit
+  if T and type(T.AddTooltipPostCall) == "function" and unitType ~= nil then
+    local function post(tt) if tt == GameTooltip then unitTooltip(tt) end end
+    if pcall(T.AddTooltipPostCall, unitType, post) then return end
+  end
+  if GameTooltip and GameTooltip.HookScript then pcall(GameTooltip.HookScript, GameTooltip, "OnTooltipSetUnit", unitTooltip) end
+end
+
+registerChatFilters()
+hookTooltips()
 
 -- ----------------------------------------------------------------- windows --
 -- Two movable windows, openable anywhere: /ff bank (the guild bank) and /ff crafts (who can make
@@ -1874,6 +2027,7 @@ if frame then
         redrawSoon()
       elseif event == "PLAYER_GUILD_UPDATE" then
         recordCharacter()
+        alts.index = nil
         requestRoster()
       elseif RECIPE_EVENTS[event] then
         if loggedIn then recordRecipes(event) end
@@ -1881,7 +2035,11 @@ if frame then
         recordCharacter()
         recordAltBank(false)
       else
-        if loggedIn then recordCharacter() end
+        if loggedIn then
+          recordCharacter()
+          -- a level or a profession skill is in what mains and alts share
+          if event == "PLAYER_LEVEL_UP" or event == "SKILL_LINES_CHANGED" then onDataChanged() end
+        end
       end
     end)
     return ok
@@ -1924,6 +2082,24 @@ SlashCmdList["FANTASYFORCE"] = function(msg)
       print_("raid loot recorded from " .. (db.lootQuality == 3 and "rare (blue)" or "epic (purple)") .. " up.")
       return
     end
+    if msg == "main" then
+      local guild = myGuild()
+      if guild == "" then
+        print_("mains are kept per guild: join one first.")
+        return
+      end
+      if type(db.mains) ~= "table" then db.mains = {} end
+      db.mains[guild] = readName()
+      recordCharacter()
+      onDataChanged()
+      print_(readName() .. " is now your main in " .. guild .. ".")
+      return
+    end
+    if msg == "tags off" or msg == "tags on" then
+      if msg == "tags on" then db.tags = nil else db.tags = false end
+      print_(db.tags == false and "guild chat no longer shows mains in front of alts." or "guild chat shows a speaker's main in front of their alts.")
+      return
+    end
     if msg == "bank" then
       toggleWindow(bankWindow)
       return
@@ -1951,8 +2127,13 @@ SlashCmdList["FANTASYFORCE"] = function(msg)
     print_(chars .. " characters, " .. members .. " guild members, " .. raids .. " raids, "
       .. shared .. " guildmates' crafters shared, last update " .. last
       .. ". " .. (isBankAlt() and "This character is a bank alt." or "Not a bank alt (/ff bankalt).")
-      .. " /ff bank and /ff crafts open the guild bank and crafting windows."
+      .. " /ff bank and /ff crafts open the guild bank and crafting windows; /ff main makes this character your main."
       .. " Saved on logout or /reload. /ff reset clears.")
   end)
   if not ok then print_("something went wrong.") end
+end
+
+-- For Accent.lua's game side (AccentChat.lua), loaded after this file.
+if type(ns) == "table" then
+  ns.try, ns.str, ns.print, ns.after = try, str, print_, after
 end

@@ -12,8 +12,10 @@
 --        recipe = spellId[:itemId]  or  :itemId  or  ::name (only when it has no id)
 --   B  the bank (subject = the bank alt):   source~money~tab~tab...
 --        tab  = name;item;item...   item = itemId[:count] (count left out when 1)
---   R  a request (subject = the asker):     bankUpdated~name:updated;name:updated...
---        "send me anything newer than these"
+--   A  one account's characters in the guild (subject = the account's random id):  main~char~char...
+--        char = name;class;level;prof;prof...   prof = name:skill
+--   R  a request (subject = the asker):     bankUpdated~name:updated;...~accountId:updated;...
+--        "send me anything newer than these" (the account list came later: older readers skip it)
 -- Numbers are base 36. Names are escaped (%XX) wherever they hold a separator, "%", "|" or a control
 -- character. Receivers ignore a protocol digit they don't know and fields past the ones they read.
 
@@ -220,28 +222,121 @@ end
 
 -- ----------------------------------------------------------------- request --
 
--- stamps = { [characterName] = updated }
-function S.encodeRequest(bankUpdated, stamps)
+local function encodeStamps(stamps)
   local names = {}
   for name in pairs(stamps or {}) do names[#names + 1] = name end
   sort(names)
   local list = {}
   for _, name in ipairs(names) do list[#list + 1] = S.esc(name) .. ":" .. S.b36(stamps[name]) end
-  return S.b36(bankUpdated) .. "~" .. concat(list, ";")
+  return concat(list, ";")
+end
+
+local function decodeStamps(field)
+  local out = {}
+  if field and field ~= "" then
+    for _, pair in ipairs(split(field, ";")) do
+      local f = split(pair, ":")
+      local name = S.unesc(f[1])
+      if name ~= "" then out[name] = S.unb36(f[2]) or 0 end
+    end
+  end
+  return out
+end
+
+-- stamps = { [characterName] = updated }, accounts = { [accountId] = updated }
+function S.encodeRequest(bankUpdated, stamps, accounts)
+  return S.b36(bankUpdated) .. "~" .. encodeStamps(stamps) .. "~" .. encodeStamps(accounts)
 end
 
 function S.decodeRequest(body)
   if type(body) ~= "string" then return nil end
   local parts = split(body, "~")
-  local req = { bank = S.unb36(parts[1]) or 0, crafters = {} }
-  if parts[2] and parts[2] ~= "" then
-    for _, pair in ipairs(split(parts[2], ";")) do
-      local f = split(pair, ":")
-      local name = S.unesc(f[1])
-      if name ~= "" then req.crafters[name] = S.unb36(f[2]) or 0 end
+  return { bank = S.unb36(parts[1]) or 0, crafters = decodeStamps(parts[2]), accounts = decodeStamps(parts[3]) }
+end
+
+-- ---------------------------------------------------------------- accounts --
+
+-- account = { main = "Name", chars = { { name, class, level, profs = { { name, skill } } } } }
+function S.encodeAccount(a)
+  local parts = { S.esc(a.main or "") }
+  for _, c in ipairs(a.chars or {}) do
+    local fields = { S.esc(c.name or ""), S.esc(c.class or ""), S.b36(c.level) }
+    for _, p in ipairs(c.profs or {}) do fields[#fields + 1] = S.esc(p.name or "") .. ":" .. S.b36(p.skill) end
+    parts[#parts + 1] = concat(fields, ";")
+  end
+  return concat(parts, "~")
+end
+
+function S.decodeAccount(body)
+  if type(body) ~= "string" then return nil end
+  local parts = split(body, "~")
+  local a = { main = S.unesc(parts[1]), chars = {} }
+  for i = 2, #parts do
+    local f = split(parts[i], ";")
+    local c = { name = S.unesc(f[1]), class = S.unesc(f[2]), level = S.unb36(f[3]) or 0, profs = {} }
+    for j = 4, #f do
+      local p = split(f[j], ":")
+      local pname = S.unesc(p[1])
+      if pname ~= "" then c.profs[#c.profs + 1] = { name = pname, skill = S.unb36(p[2]) or 0 } end
+    end
+    if c.name ~= "" then a.chars[#a.chars + 1] = c end
+  end
+  if a.main == "" or #a.chars == 0 then return nil end
+  return a
+end
+
+-- One account from character records (FantasyForceDB.characters) in one guild: its characters sorted
+-- by name, and its main: `chosen` when it's one of them, else the highest level, ties going to the
+-- most recently played. nil when the account has nobody in that guild.
+function S.accountFromCharacters(characters, guild, chosen)
+  local chars, best = {}, nil
+  for name, rec in pairs(characters or {}) do
+    if type(rec) == "table" and type(name) == "string" and name ~= "" and rec.guild == guild then
+      local c = { name = name, class = type(rec.class) == "string" and rec.class or "", level = tonumber(rec.level) or 0,
+        profs = {}, played = tonumber(rec.updated) or 0 }
+      for _, p in ipairs(type(rec.professions) == "table" and rec.professions or {}) do
+        if type(p) == "table" and type(p.name) == "string" and p.name ~= "" then
+          c.profs[#c.profs + 1] = { name = p.name, skill = tonumber(p.skill) or 0 }
+        end
+      end
+      chars[#chars + 1] = c
+      if not best or c.level > best.level or (c.level == best.level and c.played > best.played) then best = c end
     end
   end
-  return req
+  if not best then return nil end
+  sort(chars, function(x, y) return x.name < y.name end)
+  local main = best.name
+  for _, c in ipairs(chars) do
+    if c.name == chosen then main = chosen end
+    c.played = nil
+  end
+  return { main = main, chars = chars }
+end
+
+-- Who's whose main: { [characterName] = { main, account, alts = { char records }, char = record } } from
+-- accounts = { [accountId] = { updated, main, chars } }. A character listed by two accounts (moved
+-- between accounts) goes with the newer record.
+function S.mainIndex(accounts)
+  local owner = {}
+  for id, a in pairs(accounts or {}) do
+    if type(a) == "table" and type(a.chars) == "table" then
+      for _, c in ipairs(a.chars) do
+        local o = owner[c.name]
+        if not o or (tonumber(a.updated) or 0) > (tonumber(accounts[o].updated) or 0) then owner[c.name] = id end
+      end
+    end
+  end
+  local index = {}
+  for name, id in pairs(owner) do
+    local a = accounts[id]
+    local entry = { main = a.main, account = id, alts = {} }
+    for _, c in ipairs(a.chars) do
+      if c.name == name then entry.char = c end
+      if c.name ~= a.main and owner[c.name] == id then entry.alts[#entry.alts + 1] = c end
+    end
+    index[name] = entry
+  end
+  return index
 end
 
 -- --------------------------------------------------------------- chunking --
@@ -339,7 +434,18 @@ function S.storeBank(old, subject, updated, b, from)
   return { source = b.source, updated = updated, by = subject, money = b.money, tabs = b.tabs, from = from }
 end
 
--- Drops crafters not heard from in maxAge seconds.
+-- Keeps an account's newest record. Returns true when this replaced what was there.
+function S.storeAccount(accounts, id, updated, a, from, now)
+  local old = accounts[id]
+  if type(old) == "table" and (tonumber(old.updated) or 0) >= updated then
+    if old.updated == updated then old.heard = now end
+    return false
+  end
+  accounts[id] = { updated = updated, main = a.main, chars = a.chars, from = from, heard = now }
+  return true
+end
+
+-- Drops crafters (or accounts) not heard from in maxAge seconds.
 function S.prune(crafters, now, maxAge)
   for name, c in pairs(crafters) do
     if type(c) ~= "table" or (tonumber(c.heard) or tonumber(c.updated) or 0) < now - maxAge then

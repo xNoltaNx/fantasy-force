@@ -1,6 +1,6 @@
 # FantasyForce
 
-A small addon for World of Warcraft: Forever that quietly records your characters and your guild roster so the Fantasy Force website can import them, and shows the guild bank and your guildmates' crafting in game, anywhere. No chat spam.
+A small addon for World of Warcraft: Forever that quietly records your characters and your guild roster so the Fantasy Force website can import them. In game it shows the guild bank and your guildmates' crafting anywhere, puts a guildmate's main in front of what they say on an alt, and can make you talk in your race's accent. No chat spam.
 
 ## What it records
 
@@ -23,16 +23,39 @@ Both open anywhere, move by dragging (they remember where you put them) and clos
 - `/ff bank`: the guild bank. One row per item with its icon, name, count and the tab it's in; a search box and a button per tab; the gold and when the bank alt last updated it at the bottom. Hover a row for the item's tooltip; shift-click links it in chat. If you're on the bank alt's account it shows your own record, otherwise the newest one shared by the guild. Nothing yet? The bank alt types `/ff bankalt` and logs in with the addon on.
 - `/ff crafts`: who in the guild can make what. A button per profession (All, Alchemy, Blacksmithing, ...), a search box over recipe names, and one row per recipe with who can make it, online people first (with the green dot). Someone offline whose alt is online shows as "Name (Alt)", and whispering goes to the alt. Hover a row for the item's tooltip plus every crafter and their skill; click a name to whisper them, click the row to whisper the first one online, shift-click to link the item. Your own characters are in it too.
 
+## Mains and alts
+
+Each player's addon tells the guild which of their characters belong together and which one is the main.
+
+- Your main is the character you typed `/ff main` on (per guild). Until you do, it's your highest-level character in the guild (on a tie, the one you played last).
+- Guild and officer chat: when someone speaks on an alt you see their main in front, `(Morwen) anyone up for Strat?`. Nothing changes when they're on their main. Only your own chat window changes: the message others see is exactly what was typed. `/ff tags off` turns this off, `/ff tags on` back on.
+- Hovering a guildmate (their character in the world, or their portrait) adds "Alt of Morwen" on an alt, or "Alts: Bob (60), Jim (42)" on a main, and their professions with skill.
+- Like crafting, you only see this for guildmates who run the addon too, and offline members' links are passed on by whoever is online.
+
 ## Sharing with the guild
 
 The windows show what guildmates' addons share over the guild's hidden addon channel (guild only: never whispers, never other channels, never other guilds). You see someone's crafting only if both of you run the addon.
 
 - Each player's addon shares its own account's characters that are in this guild: their professions with skill, and their recipes (as spell and item ids). A character in another guild is never shared.
 - The bank alt's addon shares the bank: tab names, each item and count, the gold, and when it was recorded.
-- When: shortly after you log in (a random 5 to 20 seconds, only what changed since it last went out), 10 seconds after something changes (a profession window opened, the bank alt's bags or bank changed), and when someone asks. Opening a window asks the guild for anything newer than what you have, at most once an hour.
+- Each account shares its characters in this guild (name, class, level, professions with skill) and which is the main.
+- When: shortly after you log in (a random 5 to 20 seconds, only what changed since it last went out), 10 seconds after something changes (a profession window opened, the bank alt's bags or bank changed), and when someone asks. About a minute after you log in, and when you open a window, the addon asks the guild for anything newer than what you have, at most once an hour.
 - Anyone online can answer for someone who's offline, so you see the bank even when the bank alt isn't on. Only one copy goes out: whoever starts first, the others stay quiet.
 - Sending is paced at about one short message a second (the game's own limit), so it never floods or gets you disconnected. A big recipe list is 5 to 8 messages.
 - What you've been sent is kept in your saved file, so the windows work right after login before anyone answers. Crafters not heard from in 60 days are dropped.
+
+## Accents
+
+Talk like your race, for fun. Off until you pick one; it's saved per character.
+
+- `/accent troll` (or `orc`, `tauren`, `undead`, `skyborne`), `/accent auto` (your character's race: Troll, Orc, Tauren, Forsaken, Skyborne; Alliance races stay plain), `/accent off`.
+- `/accent light` swaps a few words; `/accent thick` swaps more and now and then adds a closing line ("Ya mon!", "Lok'tar!", "Walk with the Earth Mother.").
+- It converts what you type in say, yell, guild, officer, party, raid and whispers. `/accent chat <type> on|off` changes the list (e.g. `/accent chat whisper off`). Never channels like Trade.
+- `/troll` turns troll on and off; `/troll <message>` sends that one message in troll to the chat you're typing in, whatever your accent is.
+- Mail: the send mail window has an Accent button in the corner of the letter. It rewrites the letter (and its subject, lightly) in your accent (or your race's, if you haven't picked one). Press it again within 10 seconds to undo.
+- Never changed: item, spell and quest links, coloured text, player names in links, `/commands`, raid icons like `{skull}`, `[anything in brackets]`, `@names`, web addresses and numbers (300g, 3:30, 10x). A message that would go past chat's 255 letters drops its closing line, then goes light, then goes as typed.
+- The word lists are tables at the top of `Accent.lua`, easy to edit. Skyborne is new in Forever, so its accent (sky, wind and wings) is a placeholder until the race has a voice of its own.
+- If this game version won't let addons change what you type, one line says so; `/troll <message>` and the mail button still work.
 
 ## Where the data lives
 
@@ -44,6 +67,22 @@ World of Warcraft\_forever_\WTF\Account\<ACCOUNT>\SavedVariables\FantasyForce.lu
 
 Drag that file onto the guild website to import. (The beta client used `_classic_beta_` instead of `_forever_`; if neither exists, use Battle.net's gear icon > Show in Explorer and look for `WTF\Account`.)
 
+Mains and alts in the saved file, for the site:
+
+```lua
+FantasyForceDB.mains = { ["Fantasy Force"] = "Morwen" }       -- this account's /ff main, per guild (absent: highest level)
+FantasyForceDB.mainOf = { Morwen = "Morwen", Bob = "Morwen", Kettle = "Kettle" }  -- every character known (yours and guildmates') to its main
+FantasyForceDB.shared.accounts = {                            -- what guildmates' addons shared, one entry per account
+  ["tni7nu7mo5sq"] = { main = "Morwen", updated = 1793000500, from = "Bob", heard = 1793000510,
+    chars = { { name = "Morwen", class = "PRIEST", level = 60, profs = { { name = "Tailoring", skill = 300 } } },
+              { name = "Bob", class = "ROGUE", level = 42, profs = {} } } },
+}
+```
+
+`mainOf` is the simple one to read: this account's characters in the current guild plus every guildmate who runs the addon, rebuilt whenever something changes. `shared.accounts` has the details (`from` is who passed it on, `heard` when; account ids are random and only group characters together). If two accounts list the same character (it moved), the newer `updated` wins.
+
+Accent settings are in a second, per-character file, `WTF\Account\<ACCOUNT>\<Realm>\<Character>\SavedVariables\FantasyForce.lua` (`FantasyForceCharDB`); the site doesn't need it.
+
 ## Install
 
 Put the `FantasyForce` folder in `World of Warcraft\_forever_\Interface\AddOns\`, or install from CurseForge.
@@ -52,6 +91,8 @@ Put the `FantasyForce` folder in `World of Warcraft\_forever_\Interface\AddOns\`
 
 - `/ff` prints how many characters, guild members and raids are recorded, how many guildmates' crafters were shared, the last update, and whether this character is a bank alt.
 - `/ff bank` opens the guild bank window; `/ff crafts` opens the guild crafting window.
+- `/ff main` makes this character your main in this guild; `/ff tags off|on` hides or shows mains in front of alts in guild chat.
+- `/accent ...` and `/troll ...`: see Accents above.
 - `/ff bankalt` makes this character the guild's bank alt (or turns it off again).
 - `/ff loot rare` records rare (blue) raid loot too; `/ff loot epic` returns to epic only.
 - `/ff reset` clears everything recorded, and what guildmates shared.
