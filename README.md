@@ -38,7 +38,7 @@ It's free: Supabase's free tier holds the data and handles Discord sign-in, and 
 2. **Discord app.** At discord.com/developers/applications, create a New Application. Under **OAuth2**, copy the Client ID and reset/copy the Client Secret, then add this redirect: `https://YOUR-PROJECT.supabase.co/auth/v1/callback`.
 3. **Discord in Supabase.** In Supabase under **Authentication > Sign In / Providers > Discord**, turn it on and paste the Client ID and Secret.
 4. **Your site's address.** In Supabase under **Authentication > URL Configuration**, set the Site URL to where the site will live (for example `https://yourname.github.io/guild-roster/`) and add it to the Redirect URLs.
-5. **Publish.** Push this folder to a GitHub repo. Under **Settings > Pages**, set Source to **GitHub Actions**. Under **Settings > Secrets and variables > Actions > Variables**, add `SUPABASE_URL` and `SUPABASE_ANON_KEY`. Each push to `main` then rebuilds the site.
+5. **Publish.** Push this folder to a GitHub repo. Under **Settings > Pages**, set Source to **GitHub Actions**. Under **Settings > Secrets and variables > Actions > Variables**, add `SUPABASE_URL` and `SUPABASE_ANON_KEY`. Each push to `master` then rebuilds the site.
 6. **Make yourself Guild Master.** Sign in on the site once, then run in Supabase's SQL Editor:
    ```sql
    update public.members set rank_id = (select id from public.ranks order by sort limit 1)
