@@ -100,6 +100,8 @@ export interface ImportedCharacter {
   professions: { name: string; skill: number; max: number; recipes?: Recipe[] }[]
   inGuild: boolean
   guild: string
+  /** Chosen in game with /ff main, for the guild it's in. */
+  main?: boolean
 }
 
 export interface ImportedGuildMember {
@@ -204,12 +206,15 @@ export function readAddonFile(src: string): AddonFile {
   const m = /FantasyForceDB\s*=/.exec(src)
   if (!m) throw new Error("This isn't the Fantasy Force addon's file. Look for FantasyForce.lua in WTF\\Account\\<your account>\\SavedVariables.")
   const db = rec(parseLuaTable(src.slice(m.index + m[0].length)))
+  const mains = rec(db.mains) // /ff main: { [guild] = character name }
   const characters = list(db.characters).map((raw) => {
     const c = rec(raw)
     const cls = classId(text(c.class))
     const spec = specFor(cls, text(c.spec))
     const guild = text(c.guild)
+    const main = !!guild && text(mains[guild]).toLowerCase() === text(c.name).toLowerCase()
     return {
+      main,
       name: text(c.name),
       level: num(c.level),
       class_id: cls,

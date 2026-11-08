@@ -25,7 +25,10 @@ export function mergeRaid(a: Raid, b: Raid): Raid {
 
 /** The rows an import writes: existing characters (by name, any case) updated, new ones added. */
 export function mergeImport(existing: Character[], memberId: string, chars: ImportedCharacter[]): CharacterInput[] {
+  // The main: one chosen in game with /ff main wins; else the site's stays; else the highest level, as the addon picks.
+  const chosen = chars.find((c) => c.main)
   const hasMain = existing.some((c) => c.is_main)
+  const highest = chars.reduce((best, c, i) => ((c.level ?? 0) > (chars[best]?.level ?? 0) ? i : best), 0)
   return chars.map((c, i) => {
     const old = existing.find((e) => e.name.toLowerCase() === c.name.toLowerCase())
     // The game can't tell a bear from a cat Druid: a Feral pick made on the site stays.
@@ -38,7 +41,7 @@ export function mergeImport(existing: Character[], memberId: string, chars: Impo
       class_id: c.class_id,
       spec: keep ? old!.spec : c.spec,
       role: keep ? old!.role : c.role,
-      is_main: old ? old.is_main : !hasMain && i === 0,
+      is_main: chosen ? c === chosen : old ? old.is_main : !hasMain && i === highest,
       level: c.level,
       // Recipes only refresh when a profession window is opened in game: keep the site's when the file has none.
       professions: c.professions.map((p) => {

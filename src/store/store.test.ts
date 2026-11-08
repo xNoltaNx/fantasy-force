@@ -57,4 +57,14 @@ describe('mergeImport', () => {
     expect(mergeImport([], 'm1', [imported({}), imported({ name: 'Alt' })]).map((r) => r.is_main)).toEqual([true, false])
     expect(mergeImport([existing({ name: 'Other' })], 'm1', [imported({})])[0]!.is_main).toBe(false)
   })
+
+  it('with no main yet, picks the highest level, as the addon does', () => {
+    expect(mergeImport([], 'm1', [imported({ name: 'Low', level: 20 }), imported({ name: 'High', level: 60 })])
+      .map((r) => r.is_main)).toEqual([false, true])
+  })
+
+  it('takes the main chosen in game with /ff main over the site\'s', () => {
+    const rows = mergeImport([existing({})], 'm1', [imported({}), imported({ name: 'Alt', main: true })])
+    expect(rows.map((r) => r.is_main)).toEqual([false, true])
+  })
 })

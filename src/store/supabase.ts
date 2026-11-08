@@ -108,6 +108,10 @@ export class SupabaseStore implements Store {
     const rows = mergeImport(existing, memberId, chars)
     const fresh = rows.filter((r) => !r.id)
     const known = rows.filter((r) => r.id)
+    // A main chosen in game replaces the site's, even one on a character this file doesn't have.
+    if (rows.some((r) => r.is_main) && existing.some((e) => e.is_main && !rows.some((r) => r.id === e.id && r.is_main))) {
+      await this.ok(this.db.from('characters').update({ is_main: false }).eq('member_id', memberId))
+    }
     if (known.length) await this.ok(this.db.from('characters').upsert(known))
     if (fresh.length) await this.ok(this.db.from('characters').insert(fresh))
   }

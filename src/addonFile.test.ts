@@ -133,6 +133,14 @@ describe('readAddonFile', () => {
     ])
   })
 
+  it('marks the main chosen in game with /ff main, for its guild only', () => {
+    const withMain = SAMPLE.replace(/\}\s*$/, '\t["mains"] = { ["Fantasy Force"] = "grukka stonefist", ["Other Guild"] = "Mossy Underbridge", },\n}\n')
+    const f = readAddonFile(withMain)
+    expect(f.characters.find((c) => c.name === 'Grukka Stonefist')!.main).toBe(true)
+    expect(f.characters.find((c) => c.name === 'Mossy Underbridge')!.main).toBe(false)
+    expect(readAddonFile(SAMPLE).characters.every((c) => !c.main)).toBe(true)
+  })
+
   it('says plainly when the file is not the addon file', () => {
     expect(() => readAddonFile('SomethingElseDB = {}')).toThrow(/FantasyForce\.lua/)
   })
