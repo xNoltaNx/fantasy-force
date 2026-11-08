@@ -111,7 +111,7 @@ export function seedData(): GuildData {
   signups[6].comment = 'Work trip, sorry!'
 
   return {
-    guild: { name: 'Lanterns of the Vale', region: 'us', realm: 'Moon Guard', about: 'A relaxed raiding guild. Raids Tue and Thu, 7 to 10 pm Pacific.' },
+    guild: { name: 'Fantasy Force', region: 'us', realm: 'Moon Guard', about: 'A relaxed raiding guild. Raids Tue and Thu, 7 to 10 pm Pacific.' },
     ranks: [
       { id: 1, name: 'Guild Master', sort: 0, is_officer: true },
       { id: 2, name: 'Officer', sort: 1, is_officer: true },

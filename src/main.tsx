@@ -9,7 +9,16 @@ import { MyCharacters } from './pages/MyCharacters'
 import { Officers } from './pages/Officers'
 import { Roster } from './pages/Roster'
 import { demo, store } from './store'
+import '@fontsource/fredoka/500.css'
+import '@fontsource/fredoka/600.css'
+import '@fontsource/nunito/400.css'
+import '@fontsource/nunito/600.css'
+import '@fontsource/nunito/700.css'
+import '@fontsource/nunito/800.css'
 import './styles.css'
+
+// The guild's logo, in public/. Swap the file to change it.
+const LOGO = `${import.meta.env.BASE_URL}logo-480.webp`
 
 const PAGES = [
   { id: 'roster', name: 'Roster' },
@@ -29,10 +38,12 @@ function Shell() {
   return (
     <>
       {demo && <DemoBar />}
+      <div className="rainbow" />
       <header className="top">
         <div className="brand">
+          <img className="logo" src={LOGO} alt={`${data.guild.name} logo`} width={200} height={200} />
           <h1>{data.guild.name}</h1>
-          <p className="muted">{data.guild.about}</p>
+          <p className="tagline">{data.guild.about}</p>
         </div>
         <div className="who">
           {viewer?.member ? (

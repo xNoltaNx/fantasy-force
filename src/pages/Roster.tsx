@@ -62,7 +62,8 @@ export function Roster() {
           const others = chars.filter((c) => !c.is_main)
           const isOpen = open === m.id
           return (
-            <article key={m.id} className={`member ${isOpen ? 'open' : ''}`}>
+            <article key={m.id} className={`member ${isOpen ? 'open' : ''}`}
+              style={{ '--cls': CLASSES.find((x) => x.id === main?.class_id)?.color ?? 'transparent' } as React.CSSProperties}>
               <button className="member-head" onClick={() => setOpen(isOpen ? null : m.id)} aria-expanded={isOpen}>
                 <Avatar m={m} />
                 <span className="member-name">

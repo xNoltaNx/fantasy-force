@@ -7,7 +7,7 @@ export function RoleIcon({ role }: { role: Role }) {
 }
 
 export function ClassName({ c, children }: { c: Pick<Character, 'class_id'>; children: React.ReactNode }) {
-  return <span style={{ color: classById(c.class_id)?.color }}>{children}</span>
+  return <span className="cls-name" style={{ '--cls': classById(c.class_id)?.color } as React.CSSProperties}>{children}</span>
 }
 
 export function CharLine({ c, region, links = true }: { c: Character; region: string; links?: boolean }) {

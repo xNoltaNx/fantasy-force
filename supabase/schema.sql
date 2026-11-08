@@ -14,7 +14,7 @@ create extension if not exists pgcrypto;
 
 create table if not exists public.guild (
   id int primary key default 1 check (id = 1),
-  name text not null default 'Our Guild',
+  name text not null default 'Fantasy Force',
   region text not null default 'us' check (region in ('us', 'eu', 'kr', 'tw')),
   realm text not null default '',
   about text not null default ''
