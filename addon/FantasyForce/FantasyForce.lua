@@ -1,10 +1,14 @@
 -- FantasyForce: records this account's characters and the guild roster into
 -- FantasyForceDB (SavedVariables) for the Fantasy Force guild website.
 -- Also records the guild bank (or a bank alt's bags and bank), raid attendance and raid loot.
--- No UI, no network. Slash commands: /ff, /ff reset, /ff bankalt, /ff loot rare|epic.
+-- Shares the bank and every member's crafting with guildmates who run the addon (guild addon
+-- messages, format in Sync.lua) and shows them in two windows: /ff bank and /ff crafts.
+-- Slash commands: /ff, /ff bank, /ff crafts, /ff reset, /ff bankalt, /ff loot rare|epic.
 -- Plain Lua 5.1; every API call is guarded so a missing function never errors.
 
 local ADDON = "FantasyForce"
+local _, ns = ...
+local Sync = type(ns) == "table" and ns.Sync or nil
 local DB_VERSION = 1
 local ROSTER_THROTTLE = 60
 
@@ -14,6 +18,7 @@ local floor = math.floor
 local lastRosterRequest = 0
 local lastGuildRecord = 0
 local loggedIn = false
+local onDataChanged -- set in the sharing section: what's recorded changed, share it (debounced)
 
 -- Call a function by (possibly nil) reference without ever throwing.
 local function try(fn, ...)
@@ -46,6 +51,9 @@ local function initDB()
   local db = FantasyForceDB
   db.version = DB_VERSION
   if type(db.characters) ~= "table" then db.characters = {} end
+  -- what guildmates' addons shared (see the sharing section)
+  if type(db.shared) ~= "table" then db.shared = {} end
+  if type(db.shared.crafters) ~= "table" then db.shared.crafters = {} end
   return db
 end
 
@@ -385,6 +393,7 @@ local function recordRecipes(event)
     if prof == "" or type(list) ~= "table" or #list == 0 then return end
     if type(rec.recipes) ~= "table" then rec.recipes = {} end
     rec.recipes[prof] = list
+    if onDataChanged then onDataChanged() end
   end)
 end
 
@@ -480,6 +489,7 @@ local function recordGuildBank()
     local money = try(GetGuildBankMoney)
     if type(money) == "number" then bank.money = money end
     initDB().bank = bank
+    if onDataChanged then onDataChanged() end
   end)
 end
 
@@ -549,6 +559,7 @@ local function recordAltBank(withBank)
     local money = try(GetMoney)
     if type(money) == "number" then bank.money = money end
     db.bank = bank
+    if onDataChanged then onDataChanged() end
   end)
 end
 
@@ -707,6 +718,1098 @@ local function recordLoot(msg)
   end)
 end
 
+-- ---------------------------------------------------------------- sharing --
+-- Guildmates' addons share crafting (each account its own characters in this guild) and the bank
+-- over guild addon messages, in the format in Sync.lua. Every payload carries an `updated` stamp and
+-- receivers keep only the newest, in FantasyForceDB.shared. Sent on login (after a random 5-20 s, only
+-- what changed since it was last sent), 10 s after a change, and in answer to a request, which goes
+-- out when a window opens and none went out in the last hour. Anyone may answer for a character or
+-- bank alt that's offline (a relay): relays wait longer, and an answer is dropped when someone else
+-- starts sending the same or newer data first, so a request gets each thing about once.
+
+local PREFIX = "FantasyForce"
+local SEND_TICK = 0.25   -- at most one message every 0.25 s ...
+local SEND_BURST = 8     -- ... while the server's allowance lasts (10 per prefix at once,
+local SEND_REFILL = 1.05 -- and one more each second), so a long queue drains at about 1 a second
+local CHANGE_DELAY = 10
+local REQUEST_EVERY = 3600
+local CRAFTER_MAX_AGE = 60 * 86400
+
+local share = {
+  queue = {},        -- jobs: { kind, subject, updated, body, notBefore, answer, done, msgs, i }
+  tokens = SEND_BURST, tokensAt = 0, holdUntil = 0, pumping = false,
+  assembler = Sync and Sync.newAssembler() or nil,
+  changeGen = 0, registered = false, loginDone = false, timers = {},
+}
+local refreshWindows -- set in the windows section
+
+local function clock()
+  local t = try(GetTime)
+  if type(t) == "number" then return t end
+  return time()
+end
+
+-- Runs fn after sec seconds (C_Timer, or an OnUpdate fallback). fn never throws out.
+local function after(sec, fn)
+  local function run() pcall(fn) end
+  if C_Timer and type(C_Timer.After) == "function" and pcall(C_Timer.After, sec, run) then return end
+  if not share.timerFrame then
+    share.timerFrame = try(CreateFrame, "Frame")
+    if not share.timerFrame then return end
+    share.timerFrame:SetScript("OnUpdate", function()
+      local now, list = clock(), share.timers
+      for i = #list, 1, -1 do
+        if list[i].at <= now then
+          local t = table.remove(list, i)
+          pcall(t.fn)
+        end
+      end
+    end)
+  end
+  share.timers[#share.timers + 1] = { at = clock() + sec, fn = run }
+end
+
+local function rand(lo, hi)
+  local r = try(math.random)
+  if type(r) ~= "number" then r = 0.5 end
+  return lo + (hi - lo) * r
+end
+
+local function myGuild()
+  if not try(IsInGuild) then return "" end
+  return str((try(GetGuildInfo, "player")))
+end
+
+local function sendFn()
+  return (C_ChatInfo and C_ChatInfo.SendAddonMessage) or SendAddonMessage
+end
+
+local function registerPrefix()
+  if share.registered then return end
+  local reg = (C_ChatInfo and C_ChatInfo.RegisterAddonMessagePrefix) or RegisterAddonMessagePrefix
+  if type(reg) == "function" and pcall(reg, PREFIX) then share.registered = true end
+end
+
+local function canShare()
+  return Sync ~= nil and type(sendFn()) == "function" and try(IsInGuild) and true or false
+end
+
+local function sendResult(name, default)
+  local E = Enum and Enum.SendAddonMessageResult
+  local v = type(E) == "table" and E[name]
+  if type(v) == "number" then return v end
+  return default
+end
+
+-- "sent", "wait" (throttled or locked down: try again soon) or "drop".
+local function sendOne(msg)
+  local send = sendFn()
+  if type(send) ~= "function" then return "drop" end
+  local ok, a, b = pcall(send, PREFIX, msg, "GUILD")
+  if not ok then return "drop" end
+  local res = b -- before 11.0 the result came second
+  if res == nil then res = a end
+  if res == nil or res == true or res == 0 then return "sent" end
+  if res == false or res == sendResult("AddonMessageThrottle", 3) or res == sendResult("ChannelThrottle", 8)
+    or res == sendResult("AddOnMessageLockdown", 11) then
+    return "wait"
+  end
+  return "drop"
+end
+
+local pump
+
+local function schedulePump()
+  if share.pumping then return end
+  share.pumping = true
+  after(SEND_TICK, pump)
+end
+
+-- Queues a payload. answer: sent in answer to a request, so dropped if someone else sends it first.
+-- done runs once its last message is sent.
+local function enqueue(kind, subject, updated, body, delay, answer, done)
+  local q = share.queue
+  for i = #q, 1, -1 do
+    local j = q[i]
+    if j.kind == kind and j.subject == subject then
+      if j.updated >= updated then return end
+      if not j.msgs then table.remove(q, i) end -- an older version not started yet
+    end
+  end
+  q[#q + 1] = { kind = kind, subject = subject, updated = updated, body = body,
+    notBefore = clock() + (delay or 0), answer = answer, done = done }
+  schedulePump()
+end
+
+pump = function()
+  share.pumping = false
+  local q = share.queue
+  if #q == 0 then return end
+  if not canShare() then
+    share.queue = {}
+    return
+  end
+  local now = clock()
+  share.tokens = math.min(SEND_BURST, share.tokens + (now - share.tokensAt) / SEND_REFILL)
+  share.tokensAt = now
+  local i = 1
+  while now >= share.holdUntil and share.tokens >= 1 and i <= #q do
+    local job = q[i]
+    if job.notBefore > now then
+      i = i + 1
+    else
+      job.msgs = job.msgs or Sync.chunk(job.kind, job.subject, job.updated, job.body) or {}
+      job.i = job.i or 1
+      local msg = job.msgs[job.i]
+      local result = msg and sendOne(msg) or "drop"
+      if result == "sent" then
+        share.tokens = share.tokens - 1
+        job.i = job.i + 1
+        if job.i > #job.msgs then
+          table.remove(q, i)
+          if job.done then pcall(job.done) end
+        end
+        break -- one message a tick
+      elseif result == "wait" then
+        job.waits = (job.waits or 0) + 1
+        if job.waits > 20 then table.remove(q, i) end
+        share.holdUntil = now + 3
+      else
+        table.remove(q, i)
+      end
+    end
+  end
+  if #q > 0 then schedulePump() end
+end
+
+local function syncState()
+  local db = initDB()
+  if type(db.sync) ~= "table" then db.sync = {} end
+  if type(db.sync.own) ~= "table" then db.sync.own = {} end
+  return db.sync
+end
+
+-- This account's characters in this guild that have crafting, with the version last shared:
+-- { [name] = { crafter = ..., version = { updated, sig, by, sent } } }. A new version is stamped
+-- when a character's crafting differs from what was last shared.
+local function ownCrafters()
+  local out = {}
+  local guild = myGuild()
+  if guild == "" or not Sync then return out end
+  local db, st = initDB(), syncState()
+  for name, rec in pairs(db.characters) do
+    if type(rec) == "table" and rec.guild == guild then
+      local c = Sync.crafterFromCharacter(rec)
+      if c then
+        local sig = Sync.encodeCrafter(c)
+        local v = st.own[name]
+        if type(v) ~= "table" or v.sig ~= sig then
+          local stamp = time()
+          if type(v) == "table" and num(v.updated, 0) >= stamp then stamp = v.updated + 1 end
+          v = { updated = stamp, sig = sig, by = readName() }
+          st.own[name] = v
+        end
+        c.by = v.by
+        out[name] = { crafter = c, version = v }
+      end
+    end
+  end
+  return out
+end
+
+-- This account's bank record (a bank alt's, or a guild bank it opened) when it's this guild's.
+local function ownBank()
+  local db = initDB()
+  local b = db.bank
+  if not Sync or type(b) ~= "table" or type(b.tabs) ~= "table" then return nil end
+  local guild = myGuild()
+  local rec = db.characters[str(b.by)]
+  if guild == "" or type(rec) ~= "table" or rec.guild ~= guild then return nil end
+  return b, Sync.encodeBank(b)
+end
+
+-- Sends what changed since it was last sent.
+local function shareOwn()
+  if not canShare() then return end
+  local st = syncState()
+  for name, mine in pairs(ownCrafters()) do
+    local v = mine.version
+    if v.sent ~= v.updated then
+      enqueue("C", name, v.updated, Sync.encodeCrafter(mine.crafter), 0, false, function() v.sent = v.updated end)
+    end
+  end
+  local b, body = ownBank()
+  if b and st.bankSent ~= body then
+    enqueue("B", str(b.by), num(b.updated, time()), body, 0, false, function() st.bankSent = body end)
+  end
+end
+
+local function answerRequest(req, asker)
+  if not canShare() then return end
+  local db = initDB()
+  local mine = ownCrafters()
+  for name, m in pairs(mine) do
+    if m.version.updated > num(req.crafters[name], 0) then
+      enqueue("C", name, m.version.updated, Sync.encodeCrafter(m.crafter), rand(1, 3), true)
+    end
+  end
+  for name, c in pairs(db.shared.crafters) do
+    if not mine[name] and name ~= asker and type(c) == "table" and num(c.updated, 0) > num(req.crafters[name], 0) then
+      enqueue("C", name, c.updated, Sync.encodeCrafter(c), rand(4, 12), true)
+    end
+  end
+  local b, body = ownBank()
+  local sb = db.shared.bank
+  if type(sb) ~= "table" or type(sb.tabs) ~= "table" then sb = nil end
+  if b and num(b.updated, 0) > num(req.bank, 0) and (not sb or num(b.updated, 0) >= num(sb.updated, 0)) then
+    enqueue("B", str(b.by), b.updated, body, rand(1, 3), true)
+  elseif sb and num(sb.updated, 0) > num(req.bank, 0) then
+    enqueue("B", str(sb.by), sb.updated, Sync.encodeBank(sb), rand(4, 12), true)
+  end
+end
+
+-- Asks the guild for anything newer than what this client holds.
+local function sendRequest()
+  if not canShare() then return end
+  local db, st = initDB(), syncState()
+  local stamps = {}
+  for name, c in pairs(db.shared.crafters) do
+    if type(c) == "table" then stamps[name] = num(c.updated, 0) end
+  end
+  for name, m in pairs(ownCrafters()) do stamps[name] = m.version.updated end
+  local bankStamp = type(db.shared.bank) == "table" and num(db.shared.bank.updated, 0) or 0
+  local b = ownBank()
+  if b and num(b.updated, 0) > bankStamp then bankStamp = num(b.updated, 0) end
+  st.lastRequest = time()
+  enqueue("R", readName(), time(), Sync.encodeRequest(bankStamp, stamps), 0, false)
+end
+
+-- A window opened: ask at most once an hour (every 5 minutes while there's nothing to show).
+local function maybeRequest(haveNothing)
+  local since = time() - num(syncState().lastRequest, 0)
+  if since > REQUEST_EVERY or (haveNothing and since > 300) then sendRequest() end
+end
+
+local function onPayload(p, who)
+  local db = initDB()
+  if p.kind == "C" then
+    if db.characters[p.subject] then return end -- this account's own: ours is the source
+    local c = Sync.decodeCrafter(p.body)
+    if c and Sync.storeCrafter(db.shared.crafters, p.subject, p.updated, c, who, time()) and refreshWindows then
+      refreshWindows()
+    end
+  elseif p.kind == "B" then
+    if db.characters[p.subject] then return end
+    local b = Sync.decodeBank(p.body)
+    local stored = b and Sync.storeBank(db.shared.bank, p.subject, p.updated, b, who)
+    if stored then
+      db.shared.bank = stored
+      if refreshWindows then refreshWindows() end
+    end
+  elseif p.kind == "R" then
+    local req = Sync.decodeRequest(p.body)
+    if req then answerRequest(req, p.subject) end
+  end
+end
+
+-- Someone else is sending a payload: an answer of ours for the same (or older) data is dropped if
+-- it hasn't started. If both started, the sender whose name sorts first carries on and the other
+-- stops, so receivers get one whole copy.
+local function dropAnswers(h, who)
+  local q, me = share.queue, readName()
+  for i = #q, 1, -1 do
+    local job = q[i]
+    if job.answer and job.kind == h.kind and job.subject == h.subject and job.updated <= h.updated
+      and (not job.msgs or job.updated < h.updated or who < me) then
+      table.remove(q, i)
+    end
+  end
+end
+
+local function onAddonMessage(prefix, text, channel, sender)
+  if prefix ~= PREFIX or channel ~= "GUILD" or not Sync then return end
+  local who = stripRealm(sender)
+  if who == "" or who == readName() then return end
+  local p, h = Sync.assemble(share.assembler, sender, text, clock())
+  if h then dropAnswers(h, who) end
+  if p then onPayload(p, who) end
+end
+
+onDataChanged = function()
+  share.changeGen = share.changeGen + 1
+  local gen = share.changeGen
+  after(CHANGE_DELAY, function()
+    if gen == share.changeGen and loggedIn then shareOwn() end
+  end)
+  if refreshWindows then refreshWindows() end
+end
+
+local function onLogin()
+  registerPrefix()
+  if share.loginDone then return end
+  share.loginDone = true
+  after(rand(5, 20), function()
+    if Sync then Sync.prune(initDB().shared.crafters, time(), CRAFTER_MAX_AGE) end
+    shareOwn()
+  end)
+end
+
+registerPrefix()
+
+-- ----------------------------------------------------------------- windows --
+-- Two movable windows, openable anywhere: /ff bank (the guild bank) and /ff crafts (who can make
+-- what). Both are built by ui.make: a title, a search box, a row of filter buttons, a scrolling list
+-- and a footer line. Item and spell names the game hasn't loaded yet fill in when they arrive.
+
+local ROW_H = 20
+local FILTER_TOP = -56
+local QUESTION_ICON = "Interface\\Icons\\INV_Misc_QuestionMark"
+local ONLINE_ICON = "|TInterface\\FriendsFrame\\StatusIcon-Online:12:12|t"
+local ui = { windows = {}, onlineAt = 0, redrawQueued = false }
+
+local function itemInfo(id)
+  return try((C_Item and C_Item.GetItemInfo) or GetItemInfo, id)
+end
+
+local function itemName(id)
+  local n = try(C_Item and C_Item.GetItemNameByID, id)
+  if type(n) ~= "string" or n == "" then n = itemInfo(id) end
+  if type(n) == "string" and n ~= "" then return n end
+  try(C_Item and C_Item.RequestLoadItemDataByID, id)
+  return nil
+end
+
+local function itemIcon(id)
+  local icon = try(C_Item and C_Item.GetItemIconByID, id) or try(GetItemIcon, id)
+  if not icon then
+    local _, _, _, _, i = try((C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant, id)
+    icon = i
+  end
+  return icon
+end
+
+local function itemQualityColor(id)
+  local q = try(C_Item and C_Item.GetItemQualityByID, id)
+  if type(q) ~= "number" then
+    local _, _, iq = itemInfo(id)
+    q = iq
+  end
+  local c = type(q) == "number" and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
+  if type(c) == "table" and c.r then return c.r, c.g, c.b end
+  return 1, 1, 1
+end
+
+local function itemLink(id)
+  local _, link = itemInfo(id)
+  if type(link) == "string" then return link end
+end
+
+local function spellName(id)
+  local n = try(C_Spell and C_Spell.GetSpellName, id)
+  if type(n) ~= "string" then
+    local info = try(C_Spell and C_Spell.GetSpellInfo, id)
+    if type(info) == "table" then n = info.name end
+  end
+  if type(n) ~= "string" then n = try(GetSpellInfo, id) end
+  if type(n) == "string" and n ~= "" then return n end
+  try(C_Spell and C_Spell.RequestLoadSpellData, id)
+  return nil
+end
+
+local function spellIcon(id)
+  local icon = try(C_Spell and C_Spell.GetSpellTexture, id)
+  if not icon then
+    local info = try(C_Spell and C_Spell.GetSpellInfo, id)
+    if type(info) == "table" then icon = info.iconID end
+  end
+  if not icon then icon = try(GetSpellTexture, id) end
+  if not icon then
+    local _, _, i = try(GetSpellInfo, id)
+    icon = i
+  end
+  return icon
+end
+
+local function spellLink(id)
+  local link = try(C_Spell and C_Spell.GetSpellLink, id) or try(GetSpellLink, id)
+  if type(link) == "string" then return link end
+end
+
+local function openChat(text)
+  try((ChatFrameUtil and ChatFrameUtil.OpenChat) or ChatFrame_OpenChat, text)
+end
+
+local function linkInChat(link)
+  if type(link) ~= "string" then return end
+  if not try((ChatFrameUtil and ChatFrameUtil.InsertLink) or ChatEdit_InsertLink, link) then openChat(link) end
+end
+
+local function whisper(name)
+  if type(name) == "string" and name ~= "" then openChat("/w " .. name .. " ") end
+end
+
+local function shiftDown()
+  return try(IsShiftKeyDown) and true or false
+end
+
+local function hideTooltip()
+  if GameTooltip then try(GameTooltip.Hide, GameTooltip) end
+end
+
+-- Who in the guild is online now, read from the guild roster (looked at most every 15 s).
+local function onlineNames()
+  local now = time()
+  if ui.online and now - ui.onlineAt < 15 then return ui.online end
+  local set = {}
+  for i = 1, num(try(GetNumGuildMembers), 0) do
+    local name, _, _, _, _, _, _, _, online = try(GetGuildRosterInfo, i)
+    if online and type(name) == "string" then set[stripRealm(name)] = true end
+  end
+  set[readName()] = true
+  ui.online, ui.onlineAt = set, now
+  return set
+end
+
+local function classHex(class)
+  local c = (CUSTOM_CLASS_COLORS and CUSTOM_CLASS_COLORS[class]) or (RAID_CLASS_COLORS and RAID_CLASS_COLORS[class])
+  if type(c) ~= "table" or not c.r then return "|cffffffff" end
+  return string.format("|cff%02x%02x%02x", floor(c.r * 255), floor(c.g * 255), floor(c.b * 255))
+end
+
+local function ago(t)
+  t = num(t, 0)
+  if t <= 0 then return "never" end
+  local s = time() - t
+  if s < 120 then return "just now" end
+  if s < 7200 then return floor(s / 60) .. " min ago" end
+  if s < 172800 then return floor(s / 3600) .. " h ago" end
+  return floor(s / 86400) .. " days ago"
+end
+
+local function moneyText(m)
+  m = floor(num(m, 0))
+  local s = try(GetCoinTextureString, m)
+  if type(s) == "string" and s ~= "" then return s end
+  return floor(m / 10000) .. "g " .. (floor(m / 100) % 100) .. "s " .. (m % 100) .. "c"
+end
+
+local function setColor(tex, r, g, b, a)
+  if tex.SetColorTexture then tex:SetColorTexture(r, g, b, a) else tex:SetTexture(r, g, b, a) end
+end
+
+local function newFrame(kind, name, parent, template)
+  local ok, f = pcall(CreateFrame, kind, name, parent, template)
+  if ok and f then return f end
+  return nil
+end
+
+local function searchText(w)
+  local t = w.search and try(w.search.GetText, w.search)
+  return str(t):lower():gsub("^%s+", ""):gsub("%s+$", "")
+end
+
+-- Rows only (scrolling): what's in w.items from w.offset.
+function ui.draw(w)
+  for i = 1, w.visible do
+    local row = w.rows[i] or ui.newRow(w, i)
+    if row then
+      local item = w.items[w.offset + i]
+      row.data = item
+      if item then
+        w.fill(w, row, item)
+        row:Show()
+      else
+        row:Hide()
+      end
+    end
+  end
+  for i = w.visible + 1, #w.rows do w.rows[i]:Hide() end
+end
+
+function ui.scroll(w, offset)
+  local maxOffset = math.max(0, #w.items - w.visible)
+  offset = math.max(0, math.min(maxOffset, floor(offset)))
+  if offset == w.offset then return end
+  w.offset = offset
+  if w.slider then w.slider:SetValue(offset) end
+  ui.draw(w)
+end
+
+local function filterButton(w, i)
+  local b = w.filterButtons[i]
+  if b then return b end
+  b = newFrame("Button", nil, w.frame)
+  if not b then return nil end
+  b:SetHeight(18)
+  b.bg = b:CreateTexture(nil, "BACKGROUND")
+  b.bg:SetAllPoints()
+  b.text = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  b.text:SetPoint("CENTER")
+  local hl = b:CreateTexture(nil, "HIGHLIGHT")
+  hl:SetAllPoints()
+  setColor(hl, 1, 1, 1, 0.12)
+  b:SetScript("OnClick", function(self)
+    w.filter = self.value
+    w.offset = 0
+    pcall(ui.render, w)
+  end)
+  w.filterButtons[i] = b
+  return b
+end
+
+-- Rebuilds what the window shows: filters, rows, footer.
+function ui.render(w)
+  if not (w.frame and w.frame:IsShown()) then return end
+  local data = w.build(w)
+  local names, known = { "All" }, {}
+  for _, n in ipairs(data.filters) do
+    names[#names + 1] = n
+    known[n] = true
+  end
+  if w.filter and not known[w.filter] then
+    w.filter = nil
+    data = w.build(w)
+  end
+  local x, y, maxX = 0, 0, w.width - 24
+  for i, n in ipairs(names) do
+    local b = filterButton(w, i)
+    if b then
+      b.value = i > 1 and n or nil
+      b.text:SetText(n)
+      local bw = num(try(b.text.GetStringWidth, b.text), 40) + 14
+      if x > 0 and x + bw > maxX then x, y = 0, y + 20 end
+      b:SetWidth(bw)
+      b:ClearAllPoints()
+      b:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 12 + x, FILTER_TOP - y)
+      -- the picked filter is shown by colour, never a size change
+      if b.value == w.filter then
+        b.text:SetTextColor(1, 0.82, 0)
+        setColor(b.bg, 0.35, 0.27, 0.05, 0.9)
+      else
+        b.text:SetTextColor(0.75, 0.75, 0.75)
+        setColor(b.bg, 0.12, 0.12, 0.12, 0.8)
+      end
+      b:Show()
+      x = x + bw + 4
+    end
+  end
+  for i = #names + 1, #w.filterButtons do w.filterButtons[i]:Hide() end
+
+  local listTop = FILTER_TOP - y - 24
+  w.list:ClearAllPoints()
+  w.list:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 12, listTop)
+  w.list:SetPoint("BOTTOMRIGHT", w.frame, "BOTTOMRIGHT", -28, 30)
+  w.visible = math.max(1, floor((w.height + listTop - 30) / ROW_H))
+  w.items = data.rows
+  local maxOffset = math.max(0, #w.items - w.visible)
+  if w.offset > maxOffset then w.offset = maxOffset end
+  if w.slider then
+    w.slider:SetMinMaxValues(0, maxOffset)
+    w.slider:SetValue(w.offset)
+    if maxOffset > 0 then w.slider:Show() else w.slider:Hide() end
+  end
+  ui.draw(w)
+  w.footer:SetText(data.footer or "")
+  if #w.items == 0 then
+    w.empty:SetText(data.empty or "")
+    w.empty:Show()
+  else
+    w.empty:Hide()
+  end
+end
+
+function ui.newRow(w, i)
+  local row = newFrame("Button", nil, w.list)
+  if not row then return nil end
+  row:SetHeight(ROW_H)
+  row:SetPoint("TOPLEFT", w.list, "TOPLEFT", 0, -(i - 1) * ROW_H)
+  row:SetPoint("RIGHT", w.list, "RIGHT", 0, 0)
+  local hl = row:CreateTexture(nil, "HIGHLIGHT")
+  hl:SetAllPoints()
+  setColor(hl, 1, 1, 1, 0.08)
+  row.icon = row:CreateTexture(nil, "ARTWORK")
+  row.icon:SetSize(16, 16)
+  row.icon:SetPoint("LEFT", row, "LEFT", 2, 0)
+  row.label = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  row.label:SetPoint("LEFT", row.icon, "RIGHT", 6, 0)
+  row.label:SetWidth(w.nameWidth)
+  row.label:SetJustifyH("LEFT")
+  try(row.label.SetWordWrap, row.label, false)
+  row.right = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  row.right:SetPoint("RIGHT", row, "RIGHT", -4, 0)
+  row.right:SetJustifyH("RIGHT")
+  try(row.RegisterForClicks, row, "LeftButtonUp")
+  row:SetScript("OnEnter", function(self) if self.data then pcall(w.enter, w, self, self.data) end end)
+  row:SetScript("OnLeave", hideTooltip)
+  row:SetScript("OnClick", function(self) if self.data then pcall(w.click, w, self.data, nil) end end)
+  try(row.EnableMouseWheel, row, true)
+  row:SetScript("OnMouseWheel", function(_, delta) ui.scroll(w, w.offset - delta * 3) end)
+  if w.decorate then w.decorate(w, row) end
+  w.rows[i] = row
+  return row
+end
+
+-- Builds w's frame. Errors (a missing template or method) are caught by the caller.
+function ui.make(w)
+  local name = "FantasyForce" .. w.key .. "Window"
+  local f = newFrame("Frame", name, UIParent, "BasicFrameTemplateWithInset")
+  local framed = f and (f.CloseButton or f.TitleBg or f.Inset or f.InsetBg) and true or false
+  if not framed then
+    if not f then f = newFrame("Frame", name .. "B", UIParent, "BackdropTemplate") or newFrame("Frame", name .. "P", UIParent) end
+    if not f then return false end
+    if f.SetBackdrop then
+      pcall(f.SetBackdrop, f, {
+        bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background",
+        edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Border",
+        tile = true, tileSize = 32, edgeSize = 24,
+        insets = { left = 6, right = 6, top = 6, bottom = 6 },
+      })
+    else
+      local bg = f:CreateTexture(nil, "BACKGROUND")
+      bg:SetAllPoints()
+      setColor(bg, 0.05, 0.05, 0.05, 0.92)
+    end
+    local close = newFrame("Button", nil, f, "UIPanelCloseButton")
+    if close then close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2) end
+  end
+  w.frame = f
+  f:Hide()
+  f:SetSize(w.width, w.height)
+  f:SetFrameStrata("HIGH")
+  try(f.SetToplevel, f, true)
+  try(f.SetClampedToScreen, f, true)
+  try(f.SetDontSavePosition, f, true)
+  f:SetMovable(true)
+  f:EnableMouse(true)
+  f:RegisterForDrag("LeftButton")
+  f:SetScript("OnDragStart", function(self) self:StartMoving() end)
+  f:SetScript("OnDragStop", function(self)
+    self:StopMovingOrSizing()
+    local point, _, relPoint, x, y = self:GetPoint(1)
+    local db = initDB()
+    if type(db.windows) ~= "table" then db.windows = {} end
+    db.windows[w.key] = { point = point, relPoint = relPoint, x = x, y = y }
+  end)
+  local pos = type(initDB().windows) == "table" and initDB().windows[w.key]
+  f:ClearAllPoints()
+  if type(pos) == "table" and type(pos.point) == "string" then
+    f:SetPoint(pos.point, UIParent, pos.relPoint or pos.point, num(pos.x, 0), num(pos.y, 0))
+  else
+    f:SetPoint("CENTER", UIParent, "CENTER", w.startX or 0, 0)
+  end
+  if type(UISpecialFrames) == "table" then table.insert(UISpecialFrames, f:GetName() or name) end
+
+  local title = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  title:SetPoint("TOP", f, "TOP", 0, framed and -5 or -12)
+  title:SetText(w.title)
+
+  local sb = newFrame("EditBox", name .. "Search", f, "SearchBoxTemplate")
+    or newFrame("EditBox", name .. "SearchInput", f, "InputBoxTemplate")
+  if not sb then
+    sb = newFrame("EditBox", nil, f)
+    if sb then
+      sb:SetFontObject(ChatFontNormal or GameFontHighlightSmall)
+      local bg = sb:CreateTexture(nil, "BACKGROUND")
+      bg:SetAllPoints()
+      setColor(bg, 0, 0, 0, 0.5)
+    end
+  end
+  if sb then
+    sb:SetSize(200, 20)
+    sb:SetPoint("TOPLEFT", f, "TOPLEFT", 18, -28)
+    sb:SetAutoFocus(false)
+    local function changed()
+      w.offset = 0
+      pcall(ui.render, w)
+    end
+    if sb.HookScript then sb:HookScript("OnTextChanged", changed) else sb:SetScript("OnTextChanged", changed) end
+    local function unfocus(self) self:ClearFocus() end
+    if sb.HookScript then
+      sb:HookScript("OnEscapePressed", unfocus)
+      sb:HookScript("OnEnterPressed", unfocus)
+    end
+    w.search = sb
+  end
+
+  local list = newFrame("Frame", nil, f)
+  w.list = list
+  try(list.EnableMouseWheel, list, true)
+  list:SetScript("OnMouseWheel", function(_, delta) ui.scroll(w, w.offset - delta * 3) end)
+  local sl = newFrame("Slider", nil, f)
+  if sl then
+    sl:SetOrientation("VERTICAL")
+    sl:SetWidth(12)
+    sl:SetPoint("TOPLEFT", list, "TOPRIGHT", 6, 0)
+    sl:SetPoint("BOTTOMLEFT", list, "BOTTOMRIGHT", 6, 0)
+    local track = sl:CreateTexture(nil, "BACKGROUND")
+    track:SetAllPoints()
+    setColor(track, 0, 0, 0, 0.45)
+    sl:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
+    local thumb = try(sl.GetThumbTexture, sl)
+    if thumb then thumb:SetSize(18, 24) end
+    sl:SetMinMaxValues(0, 0)
+    sl:SetValueStep(1)
+    try(sl.SetObeyStepOnDrag, sl, true)
+    sl:SetScript("OnValueChanged", function(_, v)
+      local o = floor(num(v, 0) + 0.5)
+      if o ~= w.offset then
+        w.offset = o
+        ui.draw(w)
+      end
+    end)
+    w.slider = sl
+  end
+
+  w.footer = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  w.footer:SetPoint("BOTTOMLEFT", f, "BOTTOMLEFT", 14, 11)
+  w.footer:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -14, 11)
+  w.footer:SetJustifyH("LEFT")
+  w.empty = list:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
+  w.empty:SetPoint("CENTER", list, "CENTER", 0, 0)
+  w.empty:SetWidth(w.width - 80)
+
+  w.rows, w.filterButtons, w.items, w.offset, w.visible = {}, {}, {}, 0, 0
+  f:SetScript("OnShow", function() pcall(ui.render, w) end)
+  f:SetScript("OnHide", hideTooltip)
+  return true
+end
+
+-- Fills the tooltip over owner with an item, else a spell, else just a name.
+local function recipeTooltip(owner, item, spell, name)
+  local tt = GameTooltip
+  if not tt then return nil end
+  try(tt.SetOwner, tt, owner, "ANCHOR_RIGHT")
+  local shown = false
+  if item then shown = pcall(tt.SetItemByID, tt, item) or pcall(tt.SetHyperlink, tt, "item:" .. item) end
+  if not shown and spell then shown = pcall(tt.SetSpellByID, tt, spell) or pcall(tt.SetHyperlink, tt, "spell:" .. spell) end
+  if not shown then try(tt.SetText, tt, str(name)) end
+  return tt
+end
+
+-- ------------------------------------------------------------ bank window --
+
+local function bankData()
+  local db = initDB()
+  local own = type(db.bank) == "table" and type(db.bank.tabs) == "table" and db.bank or nil
+  local sh = db.shared.bank
+  if type(sh) ~= "table" or type(sh.tabs) ~= "table" then sh = nil end
+  if own and sh then
+    if num(sh.updated, 0) > num(own.updated, 0) then return sh end
+    return own
+  end
+  return own or sh
+end
+
+local bankWindow = { key = "Bank", title = "Fantasy Force: Guild Bank", width = 420, height = 460, nameWidth = 250, startX = -240 }
+
+function bankWindow.build(w)
+  local out = { rows = {}, filters = {}, footer = "",
+    empty = "No bank yet: the bank alt types /ff bankalt and logs in with the addon on." }
+  local bank = bankData()
+  if not bank then return out end
+  local search = searchText(w)
+  for _, t in ipairs(bank.tabs) do
+    local tab = str(type(t) == "table" and t.name)
+    if type(t) == "table" and type(t.items) == "table" then
+      out.filters[#out.filters + 1] = tab
+      if w.filter == nil or w.filter == tab then
+        for _, it in ipairs(t.items) do
+          local id = type(it) == "table" and tonumber(it.id)
+          if id then
+            local name = itemName(id) or str(it.name)
+            if name == "" then name = "Item " .. id end
+            if search == "" or name:lower():find(search, 1, true) then
+              out.rows[#out.rows + 1] = { id = id, name = name, count = floor(num(it.count, 1)), tab = tab }
+            end
+          end
+        end
+      end
+    end
+  end
+  table.sort(out.rows, function(a, b)
+    if a.name ~= b.name then return a.name < b.name end
+    return a.tab < b.tab
+  end)
+  if #out.rows == 0 then out.empty = search ~= "" and "Nothing matches." or "Nothing here." end
+  out.footer = moneyText(bank.money) .. "    Updated " .. ago(bank.updated) .. " by " .. str(bank.by)
+  return out
+end
+
+function bankWindow.fill(w, row, it)
+  row.icon:SetTexture(itemIcon(it.id) or QUESTION_ICON)
+  row.label:SetText(it.name)
+  row.label:SetTextColor(itemQualityColor(it.id))
+  row.right:SetText(it.count .. "   |cff8c8c8c" .. it.tab .. "|r")
+end
+
+function bankWindow.enter(w, row, it)
+  local tt = recipeTooltip(row, it.id, nil, it.name)
+  if tt then try(tt.Show, tt) end
+end
+
+function bankWindow.click(w, it)
+  if shiftDown() then linkInChat(itemLink(it.id)) end
+end
+
+function bankWindow.isEmpty()
+  return bankData() == nil
+end
+
+-- ---------------------------------------------------------- crafts window --
+
+-- Every known recipe with who can make it: this account's characters and what guildmates shared.
+-- Returns the recipe list, the professions with recipes, and the account groups (characters a
+-- guildmate's addon shared together, so an online alt can be whispered for an offline crafter).
+local function craftsIndex()
+  local db = initDB()
+  local list, byKey, profs, groups = {}, {}, {}, {}
+  local function add(char, c, prof, skill, r, group, own)
+    local key = prof .. "#" .. (r.id and ("s" .. r.id) or r.item and ("i" .. r.item) or ("n" .. str(r.name):lower()))
+    local e = byKey[key]
+    if not e then
+      e = { prof = prof, id = r.id, item = r.item, name = r.name, crafters = {}, seen = {} }
+      byKey[key] = e
+      list[#list + 1] = e
+      profs[prof] = true
+    end
+    if not e.item and r.item then e.item = r.item end
+    if not e.name and r.name then e.name = r.name end
+    if not e.seen[char] then
+      e.seen[char] = true
+      e.crafters[#e.crafters + 1] = { name = char, class = str(c.class), skill = skill, group = group, own = own }
+    end
+  end
+  local function addCrafter(char, c, group, own)
+    if type(c) ~= "table" or type(c.professions) ~= "table" then return end
+    for prof, p in pairs(c.professions) do
+      if type(p) == "table" and type(p.recipes) == "table" then
+        for _, r in ipairs(p.recipes) do
+          if type(r) == "table" then add(char, c, prof, num(p.skill, 0), r, group, own) end
+        end
+      end
+    end
+  end
+  if Sync then
+    for name, rec in pairs(db.characters) do addCrafter(name, Sync.crafterFromCharacter(rec), nil, true) end
+  end
+  for name, c in pairs(db.shared.crafters) do
+    if type(c) == "table" and not db.characters[name] then
+      local group = str(c.by) ~= "" and c.by or name
+      groups[group] = groups[group] or { group }
+      if name ~= group then table.insert(groups[group], name) end
+      addCrafter(name, c, group, false)
+    end
+  end
+  local profList = {}
+  for p in pairs(profs) do profList[#profList + 1] = p end
+  table.sort(profList)
+  return list, profList, groups
+end
+
+local function recipeName(e)
+  if e.resolved then return e.resolved end
+  local n = e.name or (e.id and spellName(e.id)) or (e.item and itemName(e.item))
+  if n then
+    e.resolved = n
+    return n
+  end
+  return e.id and ("Recipe " .. e.id) or ("Item " .. str(e.item))
+end
+
+local craftsWindow = { key = "Crafts", title = "Fantasy Force: Guild Crafting", width = 580, height = 480, nameWidth = 210, startX = 220 }
+
+function craftsWindow.build(w)
+  if not ui.crafts then
+    local list, profs, groups = craftsIndex()
+    ui.crafts = { list = list, profs = profs, groups = groups }
+  end
+  local idx = ui.crafts
+  local out = { rows = {}, filters = idx.profs, footer = "",
+    empty = "No crafting yet. Open each profession once on your characters; guildmates' recipes show up when they run FantasyForce too." }
+  local online = onlineNames()
+  local search = searchText(w)
+  local crafterNames = {}
+  for _, e in ipairs(idx.list) do
+    if w.filter == nil or w.filter == e.prof then
+      local name = recipeName(e)
+      if search == "" or name:lower():find(search, 1, true) then
+        local who = {}
+        for _, c in ipairs(e.crafters) do
+          crafterNames[c.name] = true
+          local via
+          if not online[c.name] and not c.own and c.group then
+            for _, other in ipairs(idx.groups[c.group] or {}) do
+              if other ~= c.name and online[other] then via = other break end
+            end
+          end
+          who[#who + 1] = { name = c.name, class = c.class, skill = c.skill, online = online[c.name] and true or false, via = via }
+        end
+        table.sort(who, function(a, b)
+          local ra = a.online and 2 or a.via and 1 or 0
+          local rb = b.online and 2 or b.via and 1 or 0
+          if ra ~= rb then return ra > rb end
+          if a.skill ~= b.skill then return a.skill > b.skill end
+          return a.name < b.name
+        end)
+        out.rows[#out.rows + 1] = { e = e, name = name, prof = e.prof, who = who }
+      end
+    end
+  end
+  table.sort(out.rows, function(a, b)
+    if a.name ~= b.name then return a.name < b.name end
+    return a.prof < b.prof
+  end)
+  if #idx.list > 0 and #out.rows == 0 then out.empty = "Nothing matches." end
+  local nCrafters = 0
+  for _ in pairs(crafterNames) do nCrafters = nCrafters + 1 end
+  out.footer = #out.rows .. " recipes, " .. nCrafters .. " crafters.  Click a name to whisper; shift-click links."
+  return out
+end
+
+local MAX_NAMES = 3
+
+local function crafterText(c)
+  if c.online then return ONLINE_ICON .. classHex(c.class) .. c.name .. "|r" end
+  if c.via then return ONLINE_ICON .. "|cffbbbbbb" .. c.name .. " (" .. c.via .. ")|r" end
+  return "|cff808080" .. c.name .. "|r"
+end
+
+local function recipeLink(e)
+  return (e.item and itemLink(e.item)) or (e.id and spellLink(e.id)) or nil
+end
+
+-- Whispers a crafter (or the online alt for them); shift-click links the recipe instead.
+function craftsWindow.click(w, d, c)
+  if shiftDown() then
+    linkInChat(recipeLink(d.e))
+    return
+  end
+  if not c then
+    c = d.who[1]
+    if not (c and (c.online or c.via)) then return end -- nobody online to whisper
+  end
+  if c.name == readName() then return end
+  whisper(c.via or c.name)
+end
+
+function craftsWindow.enter(w, row, d)
+  local e = d.e
+  local tt = recipeTooltip(row, e.item, e.id, d.name)
+  if not tt then return end
+  try(tt.AddLine, tt, " ")
+  try(tt.AddLine, tt, d.prof .. ": who can make it", 1, 0.82, 0)
+  for _, c in ipairs(d.who) do
+    local line = c.name .. " (" .. c.skill .. ")"
+    if c.online then
+      try(tt.AddLine, tt, line .. ", online", 0.25, 1, 0.25)
+    elseif c.via then
+      try(tt.AddLine, tt, line .. ", on " .. c.via, 0.6, 0.9, 0.6)
+    else
+      try(tt.AddLine, tt, line, 0.6, 0.6, 0.6)
+    end
+  end
+  try(tt.Show, tt)
+end
+
+function craftsWindow.decorate(w, row)
+  row.names = {}
+  for i = 1, MAX_NAMES do
+    local b = newFrame("Button", nil, row)
+    if b then
+      b:SetHeight(ROW_H)
+      b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      b.text:SetPoint("LEFT", b, "LEFT", 0, 0)
+      try(b.RegisterForClicks, b, "LeftButtonUp")
+      b:SetScript("OnClick", function(self) if row.data then pcall(w.click, w, row.data, self.crafter) end end)
+      b:SetScript("OnEnter", function() if row.data then pcall(w.enter, w, row, row.data) end end)
+      b:SetScript("OnLeave", hideTooltip)
+      try(b.EnableMouseWheel, b, true)
+      b:SetScript("OnMouseWheel", function(_, delta) ui.scroll(w, w.offset - delta * 3) end)
+      row.names[i] = b
+    end
+  end
+end
+
+function craftsWindow.fill(w, row, d)
+  local e = d.e
+  row.icon:SetTexture((e.item and itemIcon(e.item)) or (e.id and spellIcon(e.id)) or QUESTION_ICON)
+  row.label:SetText(d.name)
+  if e.item then row.label:SetTextColor(itemQualityColor(e.item)) else row.label:SetTextColor(1, 1, 1) end
+  local x = w.nameWidth + 30
+  local room = w.width - 40 - x - 30
+  local shownCount = 0
+  for i, b in ipairs(row.names or {}) do
+    local c = d.who[i]
+    if c then
+      b.crafter = c
+      b.text:SetText(crafterText(c))
+      local bw = num(try(b.text.GetStringWidth, b.text), 60) + 8
+      if shownCount > 0 and bw > room then
+        b:Hide()
+      else
+        b:SetWidth(bw)
+        b:ClearAllPoints()
+        b:SetPoint("LEFT", row, "LEFT", x, 0)
+        b:Show()
+        x, room = x + bw, room - bw
+        shownCount = shownCount + 1
+      end
+    else
+      b.crafter = nil
+      b:Hide()
+    end
+  end
+  local more = #d.who - shownCount
+  row.right:SetText(more > 0 and ("|cff8c8c8c+" .. more .. "|r") or "")
+end
+
+function craftsWindow.isEmpty()
+  return next(initDB().shared.crafters) == nil
+end
+
+refreshWindows = function()
+  ui.crafts = nil -- the data changed: rebuild the recipe index
+  if ui.redrawQueued then return end
+  ui.redrawQueued = true
+  after(0.5, function()
+    ui.redrawQueued = false
+    for _, w in pairs(ui.windows) do pcall(ui.render, w) end
+  end)
+end
+
+-- Names and icons the game loaded since the rows were drawn.
+local function redrawSoon()
+  if ui.redrawQueued then return end
+  local any = false
+  for _, w in pairs(ui.windows) do
+    if w.frame:IsShown() then any = true end
+  end
+  if not any then return end
+  ui.redrawQueued = true
+  after(0.3, function()
+    ui.redrawQueued = false
+    for _, w in pairs(ui.windows) do pcall(ui.render, w) end
+  end)
+end
+
+local function toggleWindow(w)
+  if not ui.windows[w.key] then
+    local ok, made = pcall(ui.make, w)
+    if not ok or not made then
+      print_("couldn't open that window in this game version.")
+      return
+    end
+    ui.windows[w.key] = w
+  end
+  if w.frame:IsShown() then
+    w.frame:Hide()
+    return
+  end
+  w.frame:Show()
+  requestRoster()
+  maybeRequest(w.isEmpty())
+end
+
 -- ----------------------------------------------------------------- events --
 
 local frame = CreateFrame and CreateFrame("Frame") or nil
@@ -718,6 +1821,7 @@ if frame then
     "GUILDBANKFRAME_OPENED", "GUILDBANKBAGSLOTS_CHANGED", "BANKFRAME_OPENED", "BAG_UPDATE_DELAYED",
     "ZONE_CHANGED_NEW_AREA", "GROUP_ROSTER_UPDATE", "RAID_ROSTER_UPDATE",
     "ENCOUNTER_END", "BOSS_KILL", "CHAT_MSG_LOOT",
+    "CHAT_MSG_ADDON", "GET_ITEM_INFO_RECEIVED", "ITEM_DATA_LOAD_RESULT", "SPELL_DATA_LOAD_RESULT",
   }
   for ev in pairs(RECIPE_EVENTS) do events[#events + 1] = ev end
   for _, ev in ipairs(events) do
@@ -726,9 +1830,15 @@ if frame then
   end
 
   frame:SetScript("OnEvent", function(_, event, arg1, arg2, arg3, arg4, arg5)
+    if event == "CHAT_MSG_ADDON" then
+      -- every addon's guild and raid messages come here: ours are picked out first thing
+      pcall(onAddonMessage, arg1, arg2, arg3, arg4)
+      return true
+    end
     local ok = pcall(function()
       if event == "PLAYER_LOGIN" or event == "PLAYER_ENTERING_WORLD" then
         loggedIn = true
+        onLogin()
         recordCharacter()
         requestRoster()
         startTicker()
@@ -756,8 +1866,12 @@ if frame then
         recordBossKill(arg2)
       elseif event == "CHAT_MSG_LOOT" then
         recordLoot(arg1)
+      elseif event == "GET_ITEM_INFO_RECEIVED" or event == "ITEM_DATA_LOAD_RESULT" or event == "SPELL_DATA_LOAD_RESULT" then
+        redrawSoon()
       elseif event == "GUILD_ROSTER_UPDATE" then
         if loggedIn then recordGuild() end
+        ui.online = nil -- who's online changed: the crafting window marks them
+        redrawSoon()
       elseif event == "PLAYER_GUILD_UPDATE" then
         recordCharacter()
         requestRoster()
@@ -788,6 +1902,7 @@ SlashCmdList["FANTASYFORCE"] = function(msg)
       lastGuildRecord = 0
       lastRosterRequest = 0
       recordCharacter()
+      if refreshWindows then refreshWindows() end
       print_("data cleared (this character re-recorded).")
       return
     end
@@ -809,6 +1924,14 @@ SlashCmdList["FANTASYFORCE"] = function(msg)
       print_("raid loot recorded from " .. (db.lootQuality == 3 and "rare (blue)" or "epic (purple)") .. " up.")
       return
     end
+    if msg == "bank" then
+      toggleWindow(bankWindow)
+      return
+    end
+    if msg == "crafts" or msg == "craft" or msg == "crafting" then
+      toggleWindow(craftsWindow)
+      return
+    end
     local chars = 0
     local latest = 0
     for _, c in pairs(db.characters) do
@@ -823,8 +1946,12 @@ SlashCmdList["FANTASYFORCE"] = function(msg)
     end
     local last = latest > 0 and date("%Y-%m-%d %H:%M", latest) or "never"
     local raids = type(db.raids) == "table" and #db.raids or 0
-    print_(chars .. " characters, " .. members .. " guild members, " .. raids .. " raids, last update " .. last
+    local shared = 0
+    for _ in pairs(db.shared.crafters) do shared = shared + 1 end
+    print_(chars .. " characters, " .. members .. " guild members, " .. raids .. " raids, "
+      .. shared .. " guildmates' crafters shared, last update " .. last
       .. ". " .. (isBankAlt() and "This character is a bank alt." or "Not a bank alt (/ff bankalt).")
+      .. " /ff bank and /ff crafts open the guild bank and crafting windows."
       .. " Saved on logout or /reload. /ff reset clears.")
   end)
   if not ok then print_("something went wrong.") end

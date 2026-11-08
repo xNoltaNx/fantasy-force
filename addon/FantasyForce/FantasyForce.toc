@@ -1,9 +1,10 @@
 ## Interface: 16001
 ## Title: Fantasy Force
-## Notes: Quietly records your characters and guild roster for the Fantasy Force guild website. No UI, no network.
+## Notes: Records your characters and guild roster for the Fantasy Force guild website, and shows the guild bank and guildmates' crafting anywhere (/ff bank, /ff crafts).
 ## Author: Fantasy Force
 ## Version: @project-version@
 ## SavedVariables: FantasyForceDB
 ## IconTexture: Interface\Icons\INV_Misc_Book_09
 
+Sync.lua
 FantasyForce.lua
