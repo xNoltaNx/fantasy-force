@@ -45,7 +45,7 @@ export function Availability() {
           const names = whoAt(grid[day][hour])
           return {
             // One hue, light to deep pink with the count; white numbers once the cell is dark enough.
-            style: n ? { background: `color-mix(in srgb, #b8326d ${Math.round(12 + 88 * (n / most))}%, #fbe6ee)`, color: n / most > 0.45 ? '#fff' : undefined } : undefined,
+            style: n ? { background: `color-mix(in srgb, var(--heat-hi) ${Math.round(12 + 88 * (n / most))}%, var(--heat-lo))`, color: n / most > 0.45 ? 'var(--on-accent)' : undefined } : undefined,
             title: `${DAYS[day]} ${hourLabel(hour)}: ${n} free${names.length ? '\n' + names.join(', ') : ''}`,
             label: n ? String(n) : '',
           }

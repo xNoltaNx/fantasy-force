@@ -16,6 +16,9 @@ import '@fontsource/nunito/600.css'
 import '@fontsource/nunito/700.css'
 import '@fontsource/nunito/800.css'
 import './styles.css'
+import { applyTheme, ThemeButton } from './theme'
+
+applyTheme()
 
 // The guild's logo, in public/. Swap the file to change it.
 const LOGO = `${import.meta.env.BASE_URL}logo-480.webp`
@@ -46,6 +49,7 @@ function Shell() {
           <p className="tagline">{data.guild.about}</p>
         </div>
         <div className="who">
+          <ThemeButton />
           {viewer?.member ? (
             <>
               <Avatar m={viewer.member} size={28} />
