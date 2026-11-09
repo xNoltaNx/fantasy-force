@@ -66,6 +66,9 @@ html, body { margin: 0; background: #050505; overflow: hidden; }
 .tpl-Inset { border: 1px solid #3c3833; border-radius: 3px; background: rgba(0, 0, 0, .32);
   box-shadow: inset 0 1px 4px rgba(0, 0, 0, .85), 0 1px 0 rgba(255, 255, 255, .04); }
 .bd-dialog { border: 3px solid #7b7466; border-radius: 6px; background: rgba(8, 8, 8, .92); }
+/* the gold-bordered dialog backdrop (the request notices): a dark plate in a bevelled gold edge, like the game's alerts */
+.bd-gold { border: 3px solid #b8913f; border-radius: 6px; background: linear-gradient(#1b1610, #0b0906);
+  box-shadow: inset 0 0 0 1px #3d2c0e, inset 0 1px 0 2px rgba(255, 230, 160, .18), 0 0 0 1px #2a1d06, 0 3px 10px rgba(0, 0, 0, .7); }
 
 /* the red close X */
 .tpl-UIPanelCloseButton::before { content: ''; position: absolute; left: 3px; top: 3px; right: 3px; bottom: 3px; border-radius: 3px;

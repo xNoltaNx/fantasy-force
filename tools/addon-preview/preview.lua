@@ -381,6 +381,34 @@ function P.chat(text, chatType, target)
   local ct, tg = FakeGame.typeInChat(client, text, chatType, target ~= "" and target or nil)
   notices.chatType, notices.chatTarget = ct, tg
 end
+-- The bar's "Send a request": a guildmate asks for something the player can make, a different one each press,
+-- arriving over the guild channel like a real one.
+local asked = 0
+function P.ask()
+  local S, ff = client and client.ns.Sync, client and client.ns.ff
+  if not S or not ff or not ff.asks or not world then return end
+  local own = world.own[world.player.name]
+  local list = {}
+  for prof, rs in pairs(own and own.recipes or {}) do
+    for _, r in ipairs(rs) do list[#list + 1] = { prof = prof, r = r } end
+  end
+  if #list == 0 then return end
+  table.sort(list, function(a, b) return a.r.name < b.r.name end)
+  asked = asked + 1
+  local pick = list[(asked - 1) % #list + 1]
+  local askers = { { "Grukka Stonefist", "WARRIOR" }, { "Morwen Hollowmere", "PRIEST" }, { "Brakka Ironhide", "DRUID" },
+    { "Sunniva Windcaller", "SHAMAN" }, { "Marrow Gravelkin", "WARRIOR" } }
+  local who = askers[(asked - 1) % #askers + 1]
+  local notes = { "For raid tonight, thanks!", "", "Can pay 5g each", "Mats are in the mail" }
+  local now = HOST_time()
+  local key = ff.asks.keyOf(pick.prof, pick.r)
+  local id = S.craftRequestId(who[1], key)
+  local r = { asker = who[1], class = who[2], prof = pick.prof, key = key, spell = pick.r.id, item = pick.r.item,
+    name = not (pick.r.id or pick.r.item) and pick.r.name or nil, qty = ({ 10, 1, 5, 2 })[(asked - 1) % 4 + 1],
+    mats = asked % 2 == 1, note = notes[(asked - 1) % #notes + 1], state = "open", created = now, updated = now }
+  deliver("Q", id, now, S.encodeCraftRequest(id, r), who[1])
+end
+
 -- What a /reload would keep, and whether the window is open (and on which tab).
 function P.save()
   local env = client.env

@@ -413,6 +413,7 @@ function FakeGame.newClient(o)
 
   -- tooltips (GameTooltip)
   function Frame.SetOwner(f, owner, anchor) f._lines, f._colors, f._text, f._owner, f._anchor = {}, {}, "", owner, anchor end
+  function Frame.IsOwned(f, owner) return f._shown and f._owner == owner or false end
   function Frame.AddLine(f, text, r, g, b, wrap)
     f._lines[#f._lines + 1] = text
     f._colors = f._colors or {}
@@ -472,7 +473,7 @@ function FakeGame.newClient(o)
     f.PortraitContainer.portrait = f.PortraitContainer:CreateTexture(nil, "ARTWORK")
     f.PortraitContainer.portrait:SetAllPoints(f.PortraitContainer)
     local ring = f.PortraitContainer:CreateTexture(nil, "OVERLAY")
-    ring:SetSize(80, 80)
+    ring:SetSize(88, 88) -- with its shadow
     ring:SetPoint("CENTER", f.PortraitContainer, "CENTER", 0, 0)
     ring:SetTexture("Interface\\FrameGeneral\\PreviewPortraitRing")
     f.TitleContainer = mock("Frame", nil, f)
@@ -622,6 +623,10 @@ function FakeGame.newClient(o)
   end }
   env.SlashCmdList = {}
   env.InCombatLockdown = function() return client.combat and true or false end
+  -- sounds are only counted, never played (client.sounds = { soundKitID, ... })
+  env.SOUNDKIT = { IG_QUEST_LIST_OPEN = 875 }
+  client.sounds = {}
+  env.PlaySound = function(kit) client.sounds[#client.sounds + 1] = kit return true end
   env.SetPortraitToTexture = function(tex, path) tex:SetTexture(path) end
   env.ButtonFrameTemplate_HideButtonBar = function(f)
     if f.Inset then f.Inset:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 4) end

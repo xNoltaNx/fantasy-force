@@ -53,7 +53,9 @@
     'interface\\friendsframe\\informationicon': svg('<circle cx="16" cy="16" r="13" fill="#1d2f52" stroke="#d8b23a" stroke-width="2.5"/><circle cx="16" cy="10" r="2.2" fill="#fff"/><rect x="14" y="14" width="4" height="10" rx="1.4" fill="#fff"/>'),
     'interface\\chatframe\\ui-chaticon-chat-up': svg('<circle cx="16" cy="16" r="14" fill="#2a2018" stroke="#8a7650" stroke-width="2"/><path d="M8 10.5h16a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-8l-5 4v-4H8a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z" fill="#f3e3b5" stroke="#5a4a2a" stroke-width="1"/>'),
     // the gold-and-bronze ring the portrait window draws around its portrait (the fake template's stand-in path)
-    'interface\\framegeneral\\previewportraitring': svg('<defs><linearGradient id="pr" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff0b8"/><stop offset=".25" stop-color="#d9b25a"/><stop offset=".55" stop-color="#7a5a22"/><stop offset=".8" stop-color="#c99a3e"/><stop offset="1" stop-color="#4a3410"/></linearGradient></defs><circle cx="40" cy="40" r="34" fill="none" stroke="#120d05" stroke-width="10"/><circle cx="40" cy="40" r="34" fill="none" stroke="url(#pr)" stroke-width="7"/><circle cx="40" cy="40" r="30.2" fill="none" stroke="#2a1e08" stroke-width="1.2"/><circle cx="40" cy="40" r="37.6" fill="none" stroke="#f6e2a0" stroke-opacity=".55" stroke-width="1"/>', '0 0 80 80'),
+    // the ring the game draws round a portrait window's picture (thin gold, as in game), with a soft shadow down-right
+    // onto the window (masked off the picture itself); 88 px with the picture's 62 in the middle
+    'interface\\framegeneral\\previewportraitring': svg('<defs><linearGradient id="pr" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff0b8"/><stop offset=".25" stop-color="#d9b25a"/><stop offset=".55" stop-color="#7a5a22"/><stop offset=".8" stop-color="#c99a3e"/><stop offset="1" stop-color="#4a3410"/></linearGradient><filter id="ps" x="-20%" y="-20%" width="140%" height="140%"><feGaussianBlur stdDeviation="2"/></filter><mask id="pm"><rect x="-4" y="-4" width="88" height="88" fill="#fff"/><circle cx="40" cy="40" r="31" fill="#000"/></mask></defs><g mask="url(#pm)"><circle cx="42" cy="42" r="37" fill="#000" fill-opacity=".8" filter="url(#ps)"/></g><circle cx="40" cy="40" r="34" fill="none" stroke="#120d05" stroke-width="6"/><circle cx="40" cy="40" r="34" fill="none" stroke="url(#pr)" stroke-width="4.2"/><circle cx="40" cy="40" r="31.4" fill="none" stroke="#2a1e08" stroke-width="1"/><circle cx="40" cy="40" r="36.6" fill="none" stroke="#f6e2a0" stroke-opacity=".5" stroke-width=".7"/>', '-4 -4 88 88'),
     'interface\\raidframe\\readycheck-ready': svg('<path d="M6 17l6.5 6.5L26 9" fill="none" stroke="#0b3a0b" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 17l6.5 6.5L26 9" fill="none" stroke="#3ce13c" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>'),
     'interface\\friendsframe\\statusicon-online': svg('<circle cx="16" cy="16" r="9" fill="#2fd12f" stroke="#0b4a0b" stroke-width="2.5"/>'),
     'interface\\moneyframe\\ui-goldicon': svg('<circle cx="16" cy="16" r="11" fill="#f5c542" stroke="#7a5600" stroke-width="2.5"/>'),
@@ -76,6 +78,7 @@
     if (typeof tex === 'number') return iconUrl(FILE_IDS[tex] || 'inv_misc_questionmark');
     const p = norm(tex);
     if (p === 'interface\\common\\whiteiconframe') return iconFrame(vc);
+    if (p === 'interface\\characterframe\\tempportraitalphamask') return svg(`<circle cx="16" cy="16" r="16" fill="${vc ? rgba([vc[0], vc[1], vc[2], vc[3] ?? 1]) : '#fff'}"/>`);
     if (STOCK[p]) return STOCK[p];
     const media = p.match(/^interface\\addons\\fantasyforce\\media\\([^.]+)/);
     if (media && tgaUrls[media[1]]) return tgaUrls[media[1]];
@@ -305,7 +308,7 @@
       const cls = ['frame', 'k-' + n.k];
       if (n.tp) n.tp.split(/[,\s]+/).forEach((t) => cls.push('tpl-' + cssClass(t)));
       if (n.nm === 'Minimap') cls.push('minimap');
-      if (n.bd) cls.push(/sliderbar/i.test(n.bd) ? 'bd-slider' : /tooltip/i.test(n.bd) ? 'bd-tooltip' : 'bd-dialog');
+      if (n.bd) cls.push(/sliderbar/i.test(n.bd) ? 'bd-slider' : /tooltip/i.test(n.bd) ? 'bd-tooltip' : /gold-border/i.test(n.bd) ? 'bd-gold' : 'bd-dialog');
       for (const f of ['chk', 'sel', 'lock', 'dis']) if (n[f]) cls.push(f);
       if (n.m || n.wh) cls.push('mouse');
       el.className = cls.join(' ');
@@ -584,7 +587,7 @@
   // ---------------------------------------------------------------- the bar --
   const bar = {
     race: document.getElementById('race'), officer: document.getElementById('officer'),
-    blocked: document.getElementById('blocked'), data: document.getElementById('data'),
+    blocked: document.getElementById('blocked'), data: document.getElementById('data'), ask: document.getElementById('ask'),
     slash: document.getElementById('slash'), reset: document.getElementById('reset'),
   };
   const DEFAULTS = { race: 'Orc', officer: false, blocked: false, data: 'full' };
@@ -625,6 +628,7 @@
   bar.officer.addEventListener('change', () => reload({ officer: bar.officer.checked }));
   bar.blocked.addEventListener('change', () => reload({ blocked: bar.blocked.checked }));
   bar.data.addEventListener('change', () => boot({ ...settings, data: bar.data.value }, '', '', 'last'));
+  bar.ask.addEventListener('click', () => act('ask'));
   bar.reset.addEventListener('click', () => { chatLog.innerHTML = ''; boot({ ...DEFAULTS }, '', '', 'last'); });
   bar.slash.addEventListener('keydown', (e) => {
     if (e.key !== 'Enter') return;

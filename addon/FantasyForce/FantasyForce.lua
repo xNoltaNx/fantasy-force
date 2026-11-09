@@ -1158,14 +1158,16 @@ function asks.create(e, qty, mats, note)
   return true, id
 end
 
--- "claimed" (by this character, someone else's open request), "done" or "cancelled" (this account's own).
+-- "claimed" (by this character, someone else's open request), "done" or "cancelled" (this account's own), or
+-- "done" by the crafter who took it (made it).
 function asks.set(id, state)
   local r = initDB().requests[id]
   if not Sync or not Sync.requestActive(r, time()) then return false end
+  local maker = state == "done" and r.state == "claimed" and r.claimer and initDB().characters[r.claimer] ~= nil
   if state == "claimed" then
     if r.state ~= "open" or asks.mine(r) then return false end
     r.claimer = readName()
-  elseif state ~= "done" and state ~= "cancelled" or not asks.mine(r) then
+  elseif not maker and (state ~= "done" and state ~= "cancelled" or not asks.mine(r)) then
     return false
   end
   r.state = state
@@ -1173,19 +1175,10 @@ function asks.set(id, state)
   return true
 end
 
--- A request arrived (or changed): the asker hears once who took theirs; the crafters may get the login line.
+-- A request arrived (or changed): the alerts (request alerts, below) say what's new for this account.
 function asks.arrived(id, r)
-  local st = syncState()
-  if type(st.claimsTold) ~= "table" then st.claimsTold = {} end
-  if r.state == "claimed" and r.claimer and asks.mine(r) then
-    local tag = r.claimer .. "@" .. num(r.created, 0)
-    if st.claimsTold[id] ~= tag then
-      st.claimsTold[id] = tag
-      print_(r.claimer .. " will make your " .. (asks.nameOf and asks.nameOf(r) or "craft") .. ".")
-    end
-  end
+  if asks.alert then pcall(asks.alert, id, r) end
   asks.changed()
-  asks.tellNew()
 end
 
 -- One line in the first minutes after login when there's something new for this account to make:
@@ -1912,7 +1905,7 @@ function ui.makeChrome(key, title, width, height, portrait)
   -- a portrait window: the inset (the game's darker content well) where the pages go, framed by the gold trim
   if f.ffPortrait and f.Inset then
     f.Inset:ClearAllPoints()
-    f.Inset:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -54)
+    f.Inset:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -60)
     f.Inset:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 4)
   end
   f:SetScript("OnHide", hideTooltip)
@@ -3311,8 +3304,12 @@ function craftsWindow.describeRequest(w, d)
   elseif r.state == "open" then
     lines[#lines + 1] = { text = facts[3], color = "GRAY", button = { label = "I'll make it", width = 80,
       tip = "Tell the guild you'll make it; " .. r.asker .. " gets a line.", onClick = function() asks.set(id, "claimed") end } }
+  elseif r.claimer and initDB().characters[r.claimer] then
+    lines[#lines + 1] = { text = r.claimer == readName() and "You'll make it" or (r.claimer .. " will make it"), color = "GREEN",
+      button = { label = "Made it", tip = "You made it: takes it off everyone's list; " .. r.asker .. " gets a line.",
+        onClick = function() asks.set(id, "done") end } }
   else
-    lines[#lines + 1] = { text = r.claimer == readName() and "You'll make it" or facts[3], color = "GREEN" }
+    lines[#lines + 1] = { text = facts[3], color = "GREEN" }
   end
   return { item = e.item, spell = e.id, icon = recipeIcon(e), name = d.name, link = recipeLink(e),
     color = e.item and { itemQualityColor(e.item) } or nil, sub = e.prof .. ", " .. craftsWindow.shortAgo(r.created) .. " ago",
@@ -4212,7 +4209,9 @@ end
 -- state. Each returns the line the command prints; controls print nothing.
 
 local cmd = {}
-local panel = { pages = {}, tabs = {}, W = 760, H = 520,
+-- TOP: where the pages start, below the title bar and the portrait (nothing sits under the portrait), as in
+-- the game's own portrait windows (their inset starts 60 down)
+local panel = { pages = {}, tabs = {}, W = 760, H = 528, TOP = -62,
   views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView },
   ICON = "Interface\\AddOns\\FantasyForce\\Media\\Icon",
   TABS = { { key = "Bank", label = "Bank" }, { key = "Crafts", label = "Crafting" }, { key = "Guild", label = "Guild" },
@@ -4542,6 +4541,13 @@ function panel.makeOptions(page)
   heading(-120, "Chat")
   o.tags = ui.check(page, 12, -142, "Mains in chat", function(on) cmd.tags(on) end,
     "Show a guildmate's main in front of what they say on an alt.")
+  o.alerts = ui.check(page, 160, -142, "Request alerts", function(on)
+    if on then initDB().requestAlerts = nil else initDB().requestAlerts = false end
+    panel.refreshOptions()
+  end, "A small notice at the top of the screen when someone asks for something you can make, and when yours is taken or made.")
+  o.alertSound = ui.check(page, 300, -142, "Alert sound", function(on)
+    if on then initDB().alertSound = nil else initDB().alertSound = false end
+  end, "A soft sound with the notice.")
 
   heading(-180, "Accent")
   o.accent = ui.choiceRow(page, 16, -202, { { "off", "Off" }, { "auto", "Auto", "Your race's accent." }, { "troll", "Troll" },
@@ -4601,6 +4607,9 @@ function panel.refreshOptions()
   o.loot.show(moreChar)
   o.loot.set(num(db.lootQuality, 4) == 3 and "rare" or "epic")
   setChecked(o.tags, db.tags ~= false)
+  setChecked(o.alerts, db.requestAlerts ~= false)
+  setChecked(o.alertSound, db.alertSound ~= false)
+  if o.alertSound then try(db.requestAlerts ~= false and o.alertSound.Enable or o.alertSound.Disable, o.alertSound) end
   local A = accentApi()
   local status = ""
   if A then
@@ -4692,16 +4701,30 @@ function panel.make()
   panel.portrait = f.ffPortrait and ui.setPortrait(f, panel.ICON) or false
   local badge = not panel.portrait and newFrame("Frame", nil, f) or nil
   if badge then
-    badge:SetSize(60, 60)
-    badge:SetPoint("TOPLEFT", f, "TOPLEFT", -14, 14)
+    -- where the game's portrait sits, with a thin gold ring and a soft shadow down-right onto the window, made
+    -- from the game's round portrait mask tinted (dark rim, gold, shadow)
+    badge:SetSize(56, 56)
+    badge:SetPoint("TOPLEFT", f, "TOPLEFT", -2, 4)
     try(badge.SetFrameLevel, badge, num(try(f.GetFrameLevel, f), 1) + 10)
+    local function disc(layer, size, dx, dy, r, g, b, a)
+      local t = badge:CreateTexture(nil, layer)
+      local ok, has = pcall(t.SetTexture, t, "Interface\\CharacterFrame\\TempPortraitAlphaMask")
+      if not ok or has == false then t:Hide() return nil end -- false: this client hasn't the file
+      t:SetSize(size, size)
+      t:SetPoint("CENTER", badge, "CENTER", dx, dy)
+      try(t.SetVertexColor, t, r, g, b, a)
+      return t
+    end
+    disc("BACKGROUND", 70, 2, -2, 0, 0, 0, 0.45)       -- the shadow
+    disc("BORDER", 66, 0, 0, 0.12, 0.08, 0.02, 1)      -- the ring's dark outer edge
+    disc("BORDER", 64, 0, 0, 0.82, 0.64, 0.28, 1)      -- the gold ring (4 px around the picture)
     local icon = badge:CreateTexture(nil, "ARTWORK")
     icon:SetAllPoints()
     icon:SetTexture(panel.ICON)
     panel.badge = icon
   end
   panel.header = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  panel.header:SetPoint("TOPLEFT", f, "TOPLEFT", panel.portrait and 62 or 54, -32)
+  panel.header:SetPoint("TOPLEFT", f, "TOPLEFT", 70, -32)
   panel.accentButton = ui.iconButton(f, "Interface\\ChatFrame\\UI-ChatIcon-Chat-Up", 22, "Accent",
     function()
       local A = accentApi()
@@ -4724,15 +4747,15 @@ function panel.make()
 
   for _, t in ipairs(panel.TABS) do
     local page = newFrame("Frame", nil, f)
-    page:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -54)
+    page:SetPoint("TOPLEFT", f, "TOPLEFT", 6, panel.TOP)
     page:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 6)
     page:Hide()
     panel.pages[t.key] = page
     local view = panel.views[t.key]
     if view then
-      ui.makeView(view, page, panel.W - 12, panel.H - 60)
+      ui.makeView(view, page, panel.W - 12, panel.H + panel.TOP - 6)
     elseif t.key == "Site" then
-      ui.makeSite(page, panel.W - 12, panel.H - 60)
+      ui.makeSite(page, panel.W - 12, panel.H + panel.TOP - 6)
     else
       panel.makeOptions(page)
     end
@@ -4742,7 +4765,7 @@ function panel.make()
   -- (the page hides while it shows), so it needs no background of its own
   local c = newFrame("Frame", nil, f)
   if c then
-    c:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -54)
+    c:SetPoint("TOPLEFT", f, "TOPLEFT", 6, panel.TOP)
     c:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 6)
     try(c.SetFrameLevel, c, num(try(f.GetFrameLevel, f), 1) + 20)
     try(c.EnableMouse, c, true)
@@ -4911,6 +4934,261 @@ function asks.badges()
   end
 end
 
+-- ---------------------------------------------------------- request alerts --
+-- When a request comes in that one of this account's characters can make: one chat line with the recipe's link
+-- and a small toast at the top of the screen in the game's alert look (dark plate, gold trim, the recipe's icon).
+-- The asker gets the same when someone takes theirs and when it's made. A burst (the requests that arrive at
+-- login) is gathered for a second: three lines and three toasts at most, the rest one "+N more". In the first
+-- minutes after login, new requests make the one login line instead of a line each. Our own frames: the game's
+-- AlertFrame would take an addon's toasts only by adding to its own lists. Never in combat: toasts and their
+-- sound wait for it to end. Each request is alerted about once (what was told is kept in the saved file).
+asks.TOAST_SECONDS, asks.TOAST_MAX, asks.TOAST_TOP, asks.TOAST_GAP = 8, 3, -200, 64
+asks.alerts, asks.toastQueue, asks.toastsShown, asks.toastFrames, asks.toastMore = {}, {}, {}, {}, 0
+
+function asks.alertsOn() return initDB().requestAlerts ~= false end
+function asks.soundOn() return initDB().alertSound ~= false end
+function asks.fighting()
+  return (try(InCombatLockdown) or try(UnitAffectingCombat, "player")) and true or false
+end
+
+-- A request arrived from the guild (new, or in a new state): queued for the alert it earns, if any.
+function asks.alert(id, r)
+  if not Sync or type(r) ~= "table" then return end
+  if r.state ~= "done" and not Sync.requestActive(r, time()) then return end
+  local st = syncState()
+  for _, k in ipairs({ "requestsTold", "claimsTold" }) do
+    if type(st[k]) ~= "table" then st[k] = {} end
+  end
+  local kind
+  if r.state == "open" and not asks.mine(r) and asks.keys()[r.key] then
+    if st.requestsTold[id] == r.created then return end
+    kind = "new"
+  elseif asks.mine(r) and r.claimer and (r.state == "claimed" or r.state == "done") then
+    local tag = (r.state == "done" and "done:" or "") .. r.claimer .. "@" .. num(r.created, 0)
+    if st.claimsTold[id] == tag then return end
+    st.claimsTold[id] = tag
+    kind = r.state == "done" and "made" or "claimed"
+  else
+    return
+  end
+  asks.alerts[#asks.alerts + 1] = { kind = kind, id = id, r = r }
+  if not asks.alertTimer then
+    asks.alertTimer = true
+    after(1, function() asks.alertTimer = nil pcall(asks.flushAlerts) end)
+  end
+end
+
+-- What a toast and the chat line say about a request.
+function asks.words(a)
+  local r, e = a.r, craftsWindow.entryFor(a.r)
+  local name = recipeName(e)
+  local qty = num(r.qty, 1) > 1 and (" x" .. num(r.qty, 1)) or ""
+  local claimer = str(r.claimer)
+  if a.kind == "new" then
+    return name .. qty .. " from " .. r.asker .. (r.mats and (" " .. ui.TICK) or ""),
+      "Craft request: " .. (recipeLink(e) or name) .. qty .. " from " .. r.asker .. ", /ff crafts", e
+  elseif a.kind == "claimed" then
+    return claimer .. " will make your " .. name, claimer .. " will make your " .. name .. ".", e
+  end
+  return claimer .. " made your " .. name, claimer .. " made your " .. name .. ".", e
+end
+
+function asks.flushAlerts()
+  local list = asks.alerts
+  asks.alerts = {}
+  if #list == 0 then return end
+  local st = syncState()
+  -- just logged in: the new ones go into the one login line
+  local folded = share.loginAt and not share.askLineSaid and time() - share.loginAt <= asks.LINE_WINDOW
+  if folded then asks.tellNew() end
+  local said, more = 0, 0
+  for _, a in ipairs(list) do
+    if a.kind == "new" then st.requestsTold[a.id] = a.r.created end
+    if not (folded and a.kind == "new") then
+      if said < asks.TOAST_MAX then
+        local _, line = asks.words(a)
+        print_(line)
+        said = said + 1
+      else
+        more = more + 1
+      end
+    end
+  end
+  if more > 0 then print_("+" .. more .. (more == 1 and " more craft request" or " more craft requests") .. ": /ff crafts") end
+  if asks.alertsOn() then
+    for _, a in ipairs(list) do asks.toastQueue[#asks.toastQueue + 1] = a end
+    asks.showToasts()
+  end
+end
+
+-- One toast: a plate the size of the game's alerts, built once and reused.
+function asks.toastFrame(i)
+  local f = asks.toastFrames[i]
+  if f then return f end
+  f = newFrame("Button", "FantasyForceToast" .. i, UIParent, "BackdropTemplate") or newFrame("Button", "FantasyForceToastB" .. i, UIParent)
+  if not f then return nil end
+  f:SetSize(300, 58)
+  try(f.SetFrameStrata, f, "DIALOG")
+  try(f.SetClampedToScreen, f, true)
+  if f.SetBackdrop then
+    pcall(f.SetBackdrop, f, { bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+      edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border", tile = true, tileSize = 32, edgeSize = 16,
+      insets = { left = 4, right = 4, top = 4, bottom = 4 } })
+  else
+    local bg = f:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    setColor(bg, 0.05, 0.04, 0.02, 0.92)
+  end
+  f.icon = f:CreateTexture(nil, "ARTWORK")
+  f.icon:SetSize(36, 36)
+  f.icon:SetPoint("LEFT", f, "LEFT", 12, 0)
+  f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  f.title:SetPoint("TOPLEFT", f, "TOPLEFT", 58, -11)
+  f.title:SetText("Craft request")
+  f.text = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  f.text:SetPoint("TOPLEFT", f, "TOPLEFT", 58, -29)
+  f.text:SetWidth(230)
+  f.text:SetJustifyH("LEFT")
+  try(f.text.SetWordWrap, f.text, false)
+  try(f.RegisterForClicks, f, "LeftButtonUp", "RightButtonUp")
+  f:SetScript("OnClick", function(self, button)
+    if button ~= "RightButton" and self.alert then asks.openRequest(self.alert.kind ~= "made" and self.alert.id or nil) end
+    asks.dropToast(self)
+  end)
+  ui.tip(f, function() return f.alert and "Craft request" or nil end, "Click: open it. Right-click: dismiss.")
+  f:Hide()
+  asks.toastFrames[i] = f
+  return f
+end
+
+-- "+N more requests" under the toasts, clicked to open the list.
+function asks.moreFrame()
+  local f = asks.toastFrames.more
+  if f then return f end
+  f = newFrame("Button", "FantasyForceToastMore", UIParent, "BackdropTemplate") or newFrame("Button", "FantasyForceToastMoreB", UIParent)
+  if not f then return nil end
+  f:SetSize(300, 26)
+  try(f.SetFrameStrata, f, "DIALOG")
+  if f.SetBackdrop then
+    pcall(f.SetBackdrop, f, { bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+      edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border", tile = true, tileSize = 32, edgeSize = 16,
+      insets = { left = 4, right = 4, top = 4, bottom = 4 } })
+  end
+  f.text = f:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  f.text:SetPoint("CENTER", f, "CENTER", 0, 0)
+  try(f.RegisterForClicks, f, "LeftButtonUp", "RightButtonUp")
+  f:SetScript("OnClick", function(_, button)
+    if button ~= "RightButton" then asks.openRequest(nil) end
+    asks.toastMore = 0
+    asks.layoutToasts()
+  end)
+  ui.tip(f, "Craft requests", "Click: open the list. Right-click: dismiss.")
+  f:Hide()
+  asks.toastFrames.more = f
+  return f
+end
+
+-- Puts the shown toasts in a column at the top of the screen, the "+N more" under them.
+function asks.layoutToasts()
+  for i, f in ipairs(asks.toastsShown) do
+    f:ClearAllPoints()
+    f:SetPoint("TOP", UIParent, "TOP", 0, asks.TOAST_TOP - (i - 1) * asks.TOAST_GAP)
+  end
+  local m = asks.toastMore > 0 and asks.moreFrame() or asks.toastFrames.more
+  if m then
+    if asks.toastMore > 0 then
+      m.text:SetText("+" .. asks.toastMore .. (asks.toastMore == 1 and " more request" or " more requests"))
+      m:ClearAllPoints()
+      m:SetPoint("TOP", UIParent, "TOP", 0, asks.TOAST_TOP - #asks.toastsShown * asks.TOAST_GAP)
+      m:Show()
+    else
+      m:Hide()
+    end
+  end
+end
+
+-- Shows what's queued (after combat, if in it): up to three toasts, the rest counted in "+N more"; one sound.
+function asks.showToasts()
+  if #asks.toastQueue == 0 then return end
+  if asks.fighting() then return end -- PLAYER_REGEN_ENABLED calls again
+  local queue = asks.toastQueue
+  asks.toastQueue = {}
+  for _, a in ipairs(queue) do
+    if #asks.toastsShown < asks.TOAST_MAX then
+      local f
+      for i = 1, asks.TOAST_MAX do
+        local c = asks.toastFrame(i)
+        if c and not c.alert then f = c break end
+      end
+      if f then
+        local text, _, e = asks.words(a)
+        f.alert, f.gen = a, num(f.gen, 0) + 1
+        f.text:SetText(text)
+        f.title:SetText(a.kind == "new" and "Craft request" or "Your craft request")
+        f.icon:SetTexture(recipeIcon(e))
+        try(f.SetAlpha, f, 1)
+        f:Show()
+        asks.toastsShown[#asks.toastsShown + 1] = f
+        asks.expire(f, f.gen, asks.TOAST_SECONDS)
+      else
+        asks.toastMore = asks.toastMore + 1
+      end
+    else
+      asks.toastMore = asks.toastMore + 1
+    end
+  end
+  asks.layoutToasts()
+  if asks.toastMore > 0 then
+    asks.moreGen = num(asks.moreGen, 0) + 1
+    local gen = asks.moreGen
+    after(asks.TOAST_SECONDS, function()
+      if gen == asks.moreGen then asks.toastMore = 0 pcall(asks.layoutToasts) end
+    end)
+  end
+  if asks.soundOn() then
+    local kit = type(SOUNDKIT) == "table" and (SOUNDKIT.UI_PROFESSIONS_WINDOW_OPEN or SOUNDKIT.IG_QUEST_LIST_OPEN) or nil
+    if kit then try(PlaySound, kit, "SFX") end
+  end
+end
+
+-- After its time a toast fades and goes (not while the mouse is on it).
+function asks.expire(f, gen, sec)
+  after(sec, function()
+    if f.gen ~= gen or not f.alert then return end
+    if try(f.IsMouseOver, f) or try(MouseIsOver, f) then asks.expire(f, gen, 2) return end
+    local step = 0
+    local function fade()
+      if f.gen ~= gen or not f.alert then return end
+      step = step + 1
+      if step >= 5 then asks.dropToast(f) return end
+      try(f.SetAlpha, f, 1 - step * 0.2)
+      after(0.1, fade)
+    end
+    fade()
+  end)
+end
+
+function asks.dropToast(f)
+  f.alert, f.gen = nil, num(f.gen, 0) + 1
+  if GameTooltip and try(GameTooltip.IsOwned, GameTooltip, f) then hideTooltip() end -- its own tooltip goes with it
+  f:Hide()
+  for i, s in ipairs(asks.toastsShown) do
+    if s == f then table.remove(asks.toastsShown, i) break end
+  end
+  pcall(asks.layoutToasts)
+end
+
+-- Opens the window on Crafting > Requests, with that request picked (nil: the list as it is).
+function asks.openRequest(id)
+  local w = craftsWindow
+  ui.loadState(w)
+  w.master = asks.REQ
+  ui.state()[w.masterKey] = asks.REQ
+  if id then w.reqPick = "req:" .. id end
+  w.keepPick = true
+  panel.open("Crafts")
+end
+
 -- ----------------------------------------------------------------- events --
 
 local frame = CreateFrame and CreateFrame("Frame") or nil
@@ -4924,6 +5202,7 @@ if frame then
     "ZONE_CHANGED_NEW_AREA", "GROUP_ROSTER_UPDATE", "RAID_ROSTER_UPDATE",
     "ENCOUNTER_END", "BOSS_KILL", "CHAT_MSG_LOOT",
     "CHAT_MSG_ADDON", "GET_ITEM_INFO_RECEIVED", "ITEM_DATA_LOAD_RESULT", "SPELL_DATA_LOAD_RESULT",
+    "PLAYER_REGEN_ENABLED",
   }
   for ev in pairs(RECIPE_EVENTS) do events[#events + 1] = ev end
   for _, ev in ipairs(events) do
@@ -4982,6 +5261,8 @@ if frame then
         recordLoot(arg1)
       elseif event == "GET_ITEM_INFO_RECEIVED" or event == "ITEM_DATA_LOAD_RESULT" or event == "SPELL_DATA_LOAD_RESULT" then
         redrawSoon()
+      elseif event == "PLAYER_REGEN_ENABLED" then
+        pcall(asks.showToasts) -- the request toasts that waited for the fight to end
       elseif event == "GUILD_ROSTER_UPDATE" then
         if loggedIn then recordGuild() end
         ui.online = nil -- who's online changed: the crafting window marks them
