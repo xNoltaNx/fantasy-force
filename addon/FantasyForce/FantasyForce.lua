@@ -5056,6 +5056,15 @@ function asks.toastFrame(i)
     asks.dropToast(self)
   end)
   ui.tip(f, function() return f.alert and "Craft request" or nil end, "Click: open it. Right-click: dismiss.")
+  -- The game's small close X in the top-right corner (the Director, 8 Nov: "show an x ... so you can close them").
+  local close = newFrame("Button", nil, f, "UIPanelCloseButton")
+  if close then
+    close:SetSize(20, 20)
+    close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
+    close:SetScript("OnClick", function() asks.dropToast(f) end)
+    f.close = close
+  end
+  f.text:SetWidth(214) -- clear of the X
   f:Hide()
   asks.toastFrames[i] = f
   return f
@@ -5083,6 +5092,13 @@ function asks.moreFrame()
     asks.layoutToasts()
   end)
   ui.tip(f, "Craft requests", "Click: open the list. Right-click: dismiss.")
+  local close = newFrame("Button", nil, f, "UIPanelCloseButton")
+  if close then
+    close:SetSize(18, 18)
+    close:SetPoint("RIGHT", f, "RIGHT", -3, 0)
+    close:SetScript("OnClick", function() asks.toastMore = 0 asks.layoutToasts() end)
+    f.close = close
+  end
   f:Hide()
   asks.toastFrames.more = f
   return f
