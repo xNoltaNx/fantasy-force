@@ -3,7 +3,7 @@ import { useApp } from '../app'
 import { CharLine, charsOf } from '../bits'
 import { store } from '../store'
 import type { Character, Profession } from '../types'
-import { allTimeZones } from '../week'
+import { myTimeZone, zoneChoices, zoneLabel } from '../week'
 import { CLASSES, classById, MAX_LEVEL, PROFESSIONS, racesFor, roleFor } from '../wow'
 import { AddonImport } from './AddonImport'
 
@@ -56,6 +56,8 @@ function Profile({ memberId }: { memberId: string }) {
   const m = data.members.find((x) => x.id === memberId)!
   const [f, setF] = useState({ display_name: m.display_name, timezone: m.timezone, about: m.about })
   const dirty = f.display_name !== m.display_name || f.timezone !== m.timezone || f.about !== m.about
+  const mine = myTimeZone()
+  const zones = zoneChoices(mine, f.timezone)
   return (
     <div className="card form">
       <h2>Profile</h2>
@@ -63,8 +65,16 @@ function Profile({ memberId }: { memberId: string }) {
         <label>Name the guild knows you by <input value={f.display_name} onChange={(e) => setF({ ...f, display_name: e.target.value })} /></label>
         <label>Time zone
           <select value={f.timezone} onChange={(e) => setF({ ...f, timezone: e.target.value })}>
-            {allTimeZones().map((z) => <option key={z} value={z}>{z.replace(/_/g, ' ')}</option>)}
+            <optgroup label="Common">
+              {zones.common.map((z) => <option key={z} value={z}>{zoneLabel(z)}</option>)}
+            </optgroup>
+            <optgroup label="All">
+              {zones.all.map((z) => <option key={z} value={z}>{zoneLabel(z)}</option>)}
+            </optgroup>
           </select>
+          {f.timezone !== mine && (
+            <button type="button" className="button ghost small" onClick={() => setF({ ...f, timezone: mine })}>Use {zoneLabel(mine)}</button>
+          )}
         </label>
       </div>
       <label>About (optional) <textarea rows={2} value={f.about} onChange={(e) => setF({ ...f, about: e.target.value })} /></label>

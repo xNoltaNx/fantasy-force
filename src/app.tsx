@@ -26,7 +26,7 @@ export function AppProvider({ children }: { children: (s: AppState | null, error
     try {
       const [viewer, data] = await Promise.all([store.viewer(), store.load()])
       const m = viewer?.member
-      const flag = m ? `guild-roster-zone-adopted-${m.id}` : ''
+      const flag = m ? `guild-roster-zone-adopted-2-${m.id}` : ''
       const zone = m ? zoneToAdopt(m.timezone, myTimeZone(), localStorage.getItem(flag) === '1') : null
       if (m && zone) {
         localStorage.setItem(flag, '1')

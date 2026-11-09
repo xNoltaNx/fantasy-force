@@ -59,6 +59,25 @@ export function allTimeZones(): string[] {
   return intl.supportedValuesOf ? intl.supportedValuesOf('timeZone') : ['UTC']
 }
 
+const COMMON_ZONES = ['America/Los_Angeles', 'America/Denver', 'America/Phoenix', 'America/Chicago', 'America/New_York',
+  'America/Halifax', 'America/Sao_Paulo', 'Europe/London', 'Europe/Berlin', 'Europe/Helsinki', 'Australia/Perth',
+  'Australia/Sydney', 'Pacific/Auckland', 'UTC']
+
+/** The time zone picker's two groups: yours and the usual ones first, then the rest. Browsers leave UTC out of
+ *  their list, so it's added, and so is the current pick, so the picker always shows what's saved. */
+export function zoneChoices(browser: string, current: string, everyZone = allTimeZones()): { common: string[]; all: string[] } {
+  const common = [...new Set([browser, ...COMMON_ZONES].filter(Boolean))]
+  const all = [...new Set([...everyZone, 'UTC', current])].filter((z) => z && !common.includes(z)).sort()
+  return { common, all }
+}
+
+/** "America/Los_Angeles" as "Los Angeles (5:44 pm)": the place and the time there now. */
+export function zoneLabel(zone: string, now = new Date()): string {
+  const place = zone === 'UTC' ? 'UTC' : zone.split('/').slice(1).join(' / ').replace(/_/g, ' ') || zone
+  const time = now.toLocaleTimeString(undefined, { timeZone: zone, hour: 'numeric', minute: '2-digit' }).toLowerCase()
+  return `${place} (${time})`
+}
+
 export function myTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 }
@@ -66,5 +85,7 @@ export function myTimeZone(): string {
 /** A new member starts on UTC: the first time they sign in, their browser's zone replaces it (once per device,
  *  so someone who picks UTC on purpose keeps it). Null: nothing to change. */
 export function zoneToAdopt(current: string, browser: string, adoptedBefore: boolean): string | null {
-  return !adoptedBefore && current === 'UTC' && browser && browser !== 'UTC' ? browser : null
+  // Africa/Abidjan too: the old picker, missing UTC from its list, showed and saved its first zone instead (8 Nov).
+  const unset = current === 'UTC' || current === 'Africa/Abidjan'
+  return !adoptedBefore && unset && browser && browser !== current ? browser : null
 }

@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { bestTimes, localCellToUtcSlot, localGrid, zoneToAdopt } from './week'
+import { bestTimes, localCellToUtcSlot, localGrid, zoneChoices, zoneToAdopt } from './week'
+
+describe('zoneChoices', () => {
+  it('puts your own and the common zones first, and every list holds UTC and the current pick', () => {
+    const { common, all } = zoneChoices('America/Chicago', 'Africa/Abidjan', ['Africa/Abidjan', 'America/Chicago', 'Europe/Paris'])
+    expect(common[0]).toBe('America/Chicago')
+    expect(common).toContain('America/Los_Angeles')
+    expect(new Set(common).size).toBe(common.length)
+    expect([...common, ...all]).toContain('UTC')
+    expect(all).toContain('Africa/Abidjan')
+    expect(all.filter((z) => common.includes(z))).toEqual([])
+  })
+})
 
 describe('zoneToAdopt', () => {
   it('takes the browser\'s time zone over the UTC a new member starts with, once', () => {
@@ -7,6 +19,7 @@ describe('zoneToAdopt', () => {
     expect(zoneToAdopt('UTC', 'America/Los_Angeles', true)).toBeNull() // adopted before: a later UTC was picked on purpose
     expect(zoneToAdopt('Europe/Berlin', 'America/Los_Angeles', false)).toBeNull() // one already chosen stays
     expect(zoneToAdopt('UTC', 'UTC', false)).toBeNull()
+    expect(zoneToAdopt('Africa/Abidjan', 'America/Los_Angeles', false)).toBe('America/Los_Angeles') // the old picker's mistake
   })
 })
 
