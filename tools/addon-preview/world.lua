@@ -63,6 +63,32 @@ local ITEMS = {
   [17011] = { "Lava Core", 3, "spell_nature_earthquake" },
   [18251] = { "Core Armor Kit", 3, "inv_misc_armorkit_05" },
   [20452] = { "Smoked Desert Dumplings", 1, "inv_misc_food_64" },
+  -- reagents
+  [2589] = { "Linen Cloth", 1, "inv_fabric_linen_01" },
+  [2770] = { "Copper Ore", 1, "inv_ore_copper_01" },
+  [2772] = { "Iron Ore", 1, "inv_ore_iron_01" },
+  [3858] = { "Mithril Ore", 1, "inv_ore_mithril_02" },
+  [10620] = { "Thorium Ore", 1, "inv_ore_thorium_02" },
+  [4338] = { "Mageweave Cloth", 1, "inv_fabric_mageweave_01" },
+  [4357] = { "Rough Blasting Powder", 1, "inv_misc_dust_01" },
+  [10560] = { "Unstable Trigger", 1, "inv_battery_01" },
+  [10561] = { "Mithril Casing", 1, "inv_gizmo_mithrilcasing_01" },
+  [15992] = { "Dense Blasting Powder", 1, "inv_misc_ammo_gunpowder_01" },
+  [15994] = { "Thorium Widget", 1, "inv_gizmo_04" },
+}
+
+-- Item classes, as GetItemInfoInstant gives them (0 consumable, 1 bag, 2 weapon, 4 armour, 7 trade goods,
+-- 15 miscellaneous): [id] = { classID, subtype }; anything not listed is trade goods.
+local CLASSES = {
+  [118] = { 0 }, [1251] = { 0 }, [2304] = { 0 }, [2459] = { 0 }, [2862] = { 0 }, [2871] = { 0 }, [3825] = { 0 },
+  [8545] = { 0 }, [12217] = { 0 }, [12404] = { 0 }, [12643] = { 0 }, [13444] = { 0 }, [13446] = { 0 }, [13452] = { 0 },
+  [13457] = { 0 }, [13510] = { 0 }, [13928] = { 0 }, [13931] = { 0 }, [14530] = { 0 }, [15564] = { 0 }, [18251] = { 0 },
+  [20452] = { 0 },
+  [4238] = { 1, "Bag" }, [14046] = { 1, "Bag" }, [14155] = { 1, "Bag" },
+  [12784] = { 2, "Two-Handed Axes" },
+  [2851] = { 4, "Mail" }, [11604] = { 4, "Plate" }, [12640] = { 4, "Plate" }, [14152] = { 4, "Cloth" }, [14154] = { 4, "Cloth" },
+  [15062] = { 4, "Leather" }, [15063] = { 4, "Leather" }, [16022] = { 4, "Miscellaneous" },
+  [6948] = { 15, "Junk" },
 }
 
 -- [id] = { name, icon }
@@ -76,6 +102,23 @@ local SPELLS = {
   [20012] = { "Enchant Gloves - Greater Agility", "spell_holy_greaterheal" },
   [20026] = { "Enchant Chest - Major Health", "spell_holy_greaterheal" },
   [20034] = { "Enchant Weapon - Crusader", "spell_holy_greaterheal" },
+  -- the professions themselves
+  [2259] = { "Alchemy", "trade_alchemy" }, [2018] = { "Blacksmithing", "trade_blacksmithing" },
+  [7411] = { "Enchanting", "trade_engraving" }, [4036] = { "Engineering", "trade_engineering" },
+  [2108] = { "Leatherworking", "inv_misc_armorkit_17" }, [3908] = { "Tailoring", "trade_tailoring" },
+  [2550] = { "Cooking", "inv_misc_food_15" }, [3273] = { "First Aid", "spell_holy_sealofsacrifice" },
+  [2575] = { "Mining", "trade_mining" }, [2366] = { "Herb Gathering", "spell_nature_naturetouchgrow" },
+  [8613] = { "Skinning", "inv_misc_pelt_wolf_01" }, [7620] = { "Fishing", "trade_fishing" },
+}
+
+-- What some recipes take, recorded with the player's own recipes: [made item] = { { item, count } }.
+local REAGENTS = {
+  [2840] = { { 2770, 1 } }, [3575] = { { 2772, 1 } }, [3860] = { { 3858, 1 } }, [12359] = { { 10620, 1 } },
+  [4358] = { { 4357, 2 }, { 2589, 1 } },
+  [10562] = { { 10561, 1 }, { 15992, 2 }, { 3860, 1 } },
+  [15993] = { { 15994, 1 }, { 12359, 3 }, { 15992, 3 }, { 14047, 3 } },
+  [10646] = { { 4338, 1 }, { 15992, 3 }, { 10560, 1 } },
+  [16022] = { { 15994, 4 }, { 12360, 10 }, { 17010, 4 }, { 14047, 6 } },
 }
 
 -- Recipes by profession, low skill to high: a character knows the share their skill reaches.
@@ -105,37 +148,43 @@ local function recipesAt(prof, skill)
     else
       out[#out + 1] = { id = r.spell, item = r.item, name = SPELLS[r.spell][1] }
     end
+    local made = out[#out].item
+    if REAGENTS[made] then
+      out[#out].reagents = {}
+      for _, g in ipairs(REAGENTS[made]) do table.insert(out[#out].reagents, { item = g[1], count = g[2] }) end
+    end
   end
   return out
 end
 
 -- Guildmates' accounts (the first character is the main). Online characters marked with true.
--- { name, class, race, level, { { profession, skill } }, online }
+-- { name, class, race, level, { { profession, skill } }, online, spec = talent tree, roles = their own pick }
+-- Roles follow the spec (the website's rule) unless the player picked them.
 local ACCOUNTS = {
-  { { "Grukka Stonefist", "WARRIOR", "Orc", 60, { { "Blacksmithing", 300 }, { "Mining", 300 } }, true },
-    { "Ashka Stonefist", "PRIEST", "Troll", 34, { { "Tailoring", 165 }, { "First Aid", 225 } } },
+  { { "Grukka Stonefist", "WARRIOR", "Orc", 60, { { "Blacksmithing", 300 }, { "Mining", 300 } }, true, spec = "Protection" },
+    { "Ashka Stonefist", "PRIEST", "Troll", 34, { { "Tailoring", 165 }, { "First Aid", 225 } }, spec = "Shadow" },
     { "Fantasy Bankalt", "WARRIOR", "Undead", 5, {} } },
-  { { "Morwen Hollowmere", "PRIEST", "Undead", 60, { { "Alchemy", 300 }, { "Herbalism", 300 } }, true },
-    { "Silt Hollowmere", "ROGUE", "Undead", 47, { { "Skinning", 220 }, { "Leatherworking", 210 } } },
-    { "Ember Hollowmere", "MAGE", "Undead", 19, { { "Enchanting", 90 } } } },
-  { { "Brakka Ironhide", "DRUID", "Tauren", 60, { { "Leatherworking", 300 }, { "Skinning", 300 } } },
-    { "Brakka Longsight", "HUNTER", "Orc", 52, { { "Engineering", 240 }, { "Mining", 245 } }, true } },
-  { { "Sunniva Windcaller", "SHAMAN", "Skyborne", 60, { { "Herbalism", 300 }, { "Alchemy", 295 }, { "Cooking", 300 } } },
-    { "Sunclaw Windcaller", "DRUID", "Tauren", 41, { { "Fishing", 180 } } } },
-  { { "Vashir Nightshade", "ROGUE", "Troll", 60, { { "Alchemy", 260 }, { "Herbalism", 270 } } },
-    { "Vashir Dreadmoor", "WARLOCK", "Undead", 38, { { "Tailoring", 180 } }, true },
-    { "Vashtusk Grimhorn", "WARRIOR", "Tauren", 26, { { "Mining", 110 } } } },
-  { { "Orla Tidesong", "SHAMAN", "Troll", 60, { { "Herbalism", 300 }, { "First Aid", 300 } }, true },
-    { "Orla Stormcrest", "SHAMAN", "Skyborne", 44, { { "Enchanting", 200 }, { "Tailoring", 210 } } } },
-  { { "Pip Ashwhistle", "MAGE", "Undead", 60, { { "Tailoring", 300 }, { "Enchanting", 290 } }, true } },
-  { { "Dunmore Blackthorn", "WARLOCK", "Undead", 60, { { "Tailoring", 285 }, { "Enchanting", 300 } } },
-    { "Dunmore Ruttusk", "WARRIOR", "Orc", 30, { { "Blacksmithing", 140 }, { "Mining", 150 } } } },
-  { { "Yseth Moonhoof", "DRUID", "Tauren", 60, { { "Herbalism", 300 }, { "Alchemy", 300 } } } },
-  { { "Grell Bonechewer", "HUNTER", "Troll", 58, { { "Skinning", 280 }, { "Leatherworking", 270 } } },
-    { "Grell Hexmoor", "PRIEST", "Troll", 27, {} } },
-  { { "Marrow Gravelkin", "WARRIOR", "Undead", 60, { { "Mining", 300 }, { "Blacksmithing", 290 }, { "Fishing", 300 } } } },
-  { { "Tamsin Duskhorn", "DRUID", "Tauren", 56, { { "Cooking", 260 }, { "Fishing", 240 } } },
-    { "Tamsin Wraithe", "PRIEST", "Undead", 33, { { "Tailoring", 160 } } } },
+  { { "Morwen Hollowmere", "PRIEST", "Undead", 60, { { "Alchemy", 300 }, { "Herbalism", 300 } }, true, spec = "Holy" },
+    { "Silt Hollowmere", "ROGUE", "Undead", 47, { { "Skinning", 220 }, { "Leatherworking", 210 } }, spec = "Combat" },
+    { "Ember Hollowmere", "MAGE", "Undead", 19, { { "Enchanting", 90 } }, spec = "Frost" } },
+  { { "Brakka Ironhide", "DRUID", "Tauren", 60, { { "Leatherworking", 300 }, { "Skinning", 300 } }, spec = "Feral (bear)", roles = { "tank", "dps" } },
+    { "Brakka Longsight", "HUNTER", "Orc", 52, { { "Engineering", 240 }, { "Mining", 245 } }, true, spec = "Marksmanship" } },
+  { { "Sunniva Windcaller", "SHAMAN", "Skyborne", 60, { { "Herbalism", 300 }, { "Alchemy", 295 }, { "Cooking", 300 } }, spec = "Restoration" },
+    { "Sunclaw Windcaller", "DRUID", "Tauren", 41, { { "Fishing", 180 } }, spec = "Balance" } },
+  { { "Vashir Nightshade", "ROGUE", "Troll", 60, { { "Alchemy", 260 }, { "Herbalism", 270 } }, spec = "Combat" },
+    { "Vashir Dreadmoor", "WARLOCK", "Undead", 38, { { "Tailoring", 180 } }, true, spec = "Affliction" },
+    { "Vashtusk Grimhorn", "WARRIOR", "Tauren", 26, { { "Mining", 110 } }, spec = "Protection" } },
+  { { "Orla Tidesong", "SHAMAN", "Troll", 60, { { "Herbalism", 300 }, { "First Aid", 300 } }, true, spec = "Restoration" },
+    { "Orla Stormcrest", "SHAMAN", "Skyborne", 44, { { "Enchanting", 200 }, { "Tailoring", 210 } }, spec = "Elemental" } },
+  { { "Pip Ashwhistle", "MAGE", "Undead", 60, { { "Tailoring", 300 }, { "Enchanting", 290 } }, true, spec = "Frost" } },
+  { { "Dunmore Blackthorn", "WARLOCK", "Undead", 60, { { "Tailoring", 285 }, { "Enchanting", 300 } }, spec = "Destruction" },
+    { "Dunmore Ruttusk", "WARRIOR", "Orc", 30, { { "Blacksmithing", 140 }, { "Mining", 150 } }, spec = "Arms" } },
+  { { "Yseth Moonhoof", "DRUID", "Tauren", 60, { { "Herbalism", 300 }, { "Alchemy", 300 } }, spec = "Restoration", roles = { "healer", "dps" } } },
+  { { "Grell Bonechewer", "HUNTER", "Troll", 58, { { "Skinning", 280 }, { "Leatherworking", 270 } }, spec = "Beast Mastery" },
+    { "Grell Hexmoor", "PRIEST", "Troll", 27, {}, spec = "Discipline" } },
+  { { "Marrow Gravelkin", "WARRIOR", "Undead", 60, { { "Mining", 300 }, { "Blacksmithing", 290 }, { "Fishing", 300 } }, spec = "Arms", roles = { "tank", "dps" } } },
+  { { "Tamsin Duskhorn", "DRUID", "Tauren", 56, { { "Cooking", 260 }, { "Fishing", 240 } }, spec = "Balance" },
+    { "Tamsin Wraithe", "PRIEST", "Undead", 33, { { "Tailoring", 160 } }, spec = "Holy" } },
 }
 
 -- In the guild, without the addon (the guild list only).
@@ -146,14 +195,15 @@ local ROSTER_ONLY = {
 
 -- The player's own account: the main the preview logs in as, and two alts (one with recipes not recorded yet).
 local OWN = {
-  { "Kettle Brewgut", "HUNTER", "Orc", 60, { { "Engineering", 300 }, { "Mining", 280 } }, true },
-  { "Kettle Emberbrew", "SHAMAN", "Troll", 36, { { "Herbalism", 190 }, { "Alchemy", 175 } }, false, noRecipes = true },
-  { "Kettle Duskhoof", "DRUID", "Tauren", 24, { { "Skinning", 110 }, { "Leatherworking", 105 } } },
+  { "Kettle Brewgut", "HUNTER", "Orc", 60, { { "Engineering", 300 }, { "Mining", 280 } }, true, spec = "Marksmanship" },
+  { "Kettle Emberbrew", "SHAMAN", "Troll", 36, { { "Herbalism", 190 }, { "Alchemy", 175 } }, false, noRecipes = true, spec = "Restoration" },
+  { "Kettle Duskhoof", "DRUID", "Tauren", 24, { { "Skinning", 110 }, { "Leatherworking", 105 } }, spec = "Feral (bear)" },
 }
 
 local function record(c, now, ago)
   local rec = { name = c[1], class = c[2], race = c[3], raceName = c[3], level = c[4], faction = "Horde",
-    guild = GUILD, rank = "Raider", updated = now - ago, professions = {}, recipes = {} }
+    guild = GUILD, rank = "Raider", updated = now - ago, professions = {}, recipes = {}, spec = c.spec }
+  if c.roles then rec.roles, rec.rolesSet = c.roles, true end
   for _, p in ipairs(c[5]) do
     rec.professions[#rec.professions + 1] = { name = p[1], skill = p[2], max = 300 }
     if not GATHERING[p[1]] and not c.noRecipes then rec.recipes[p[1]] = recipesAt(p[1], p[2]) end
@@ -176,7 +226,10 @@ end
 
 return function(now)
   local W = { guild = GUILD, items = {}, spells = {}, accounts = {}, own = {}, roster = {} }
-  for id, it in pairs(ITEMS) do W.items[id] = { name = it[1], quality = it[2], icon = "Interface\\Icons\\" .. it[3] } end
+  for id, it in pairs(ITEMS) do
+    local class = CLASSES[id] or { 7, "Trade Goods" }
+    W.items[id] = { name = it[1], quality = it[2], icon = "Interface\\Icons\\" .. it[3], classID = class[1], sub = class[2] }
+  end
   for id, s in pairs(SPELLS) do W.spells[id] = { name = s[1], icon = "Interface\\Icons\\" .. s[2] } end
 
   for i, list in ipairs(ACCOUNTS) do
@@ -206,6 +259,13 @@ return function(now)
       { name = "Bags", items = { it(13446, 60), it(13444, 45), it(13457, 38), it(13452, 12), it(13510, 3), it(12404, 80), it(6948, 1) } },
       { name = "Bank", items = { it(12359, 140), it(12360, 6), it(14047, 420), it(14342, 9), it(7078, 24), it(7068, 51),
         it(17010, 7), it(17011, 11), it(13468, 4), it(14344, 15), it(15417, 8), it(12811, 3), it(12784, 1), it(12640, 1) } },
+    } }
+  -- the scan before it, three days earlier: fewer potions and Runecloth, more Thorium, no Lionheart Helm yet
+  W.bankBefore = { source = "alt", by = "Fantasy Bankalt", updated = now - 74 * 3600, money = 3950210, sender = "Grukka Stonefist",
+    tabs = {
+      { name = "Bags", items = { it(13446, 40), it(13444, 45), it(13457, 20), it(13452, 12), it(13510, 2), it(12404, 80), it(6948, 1) } },
+      { name = "Bank", items = { it(12359, 160), it(12360, 6), it(14047, 400), it(14342, 9), it(7078, 24), it(7068, 51),
+        it(17010, 5), it(17011, 11), it(13468, 4), it(14344, 15), it(15417, 8), it(12811, 3), it(12784, 1) } },
     } }
 
   local here = { "Kettle Brewgut", "Grukka Stonefist", "Morwen Hollowmere", "Brakka Ironhide", "Sunniva Windcaller",

@@ -253,6 +253,12 @@ local function recordCharacter()
     rec.rank = str(grank)
 
     rec.updated = time()
+    -- every character's roles, for the site: its own pick, else its spec's usual job (Sync.rolesFor)
+    if Sync then
+      for _, r in pairs(db.characters) do
+        if type(r) == "table" then r.roles = Sync.rolesFor(r) end
+      end
+    end
   end)
   return ok
 end
@@ -341,6 +347,35 @@ local function tradeSkillName()
   return ""
 end
 
+-- An id out of a game link: "item:12784:..." or "enchant:20034" / "spell:20034".
+local function linkId(link, kind)
+  if type(link) ~= "string" then return nil end
+  return tonumber(link:match(kind .. ":(%d+)"))
+end
+
+-- What a recipe takes, { { item, count, name } }, or nil: from a recipe schematic, or from the classic
+-- window's numbered reagents (numFn, infoFn, linkFn, i: GetTradeSkillNumReagents and the rest).
+local function schematicReagents(schematic, numFn, infoFn, linkFn, i)
+  local out = {}
+  if type(schematic) == "table" then
+    for _, slot in ipairs(type(schematic.reagentSlotSchematics) == "table" and schematic.reagentSlotSchematics or {}) do
+      local first = type(slot) == "table" and type(slot.reagents) == "table" and slot.reagents[1]
+      local id = type(first) == "table" and num(first.itemID, nil)
+      if id and (slot.reagentType == nil or slot.reagentType == 1) then
+        out[#out + 1] = { item = id, count = num(slot.quantityRequired, 1) }
+      end
+    end
+  elseif type(numFn) == "function" then
+    for j = 1, num(try(numFn, i), 0) do
+      local name, _, count = try(infoFn, i, j)
+      local id = linkId(try(linkFn, i, j), "item")
+      if id or str(name) ~= "" then out[#out + 1] = { item = id, count = num(count, 1), name = str(name) ~= "" and name or nil } end
+    end
+  end
+  if #out == 0 then return nil end
+  return out
+end
+
 local function readRecipesModern()
   if not (C_TradeSkillUI and type(C_TradeSkillUI.GetAllRecipeIDs) == "function") then return nil end
   local ids = try(C_TradeSkillUI.GetAllRecipeIDs)
@@ -352,16 +387,10 @@ local function readRecipesModern()
       -- the item it makes, for its icon and tooltip on the site
       local schematic = try(C_TradeSkillUI.GetRecipeSchematic, id, false)
       local item = type(schematic) == "table" and num(schematic.outputItemID, nil) or nil
-      out[#out + 1] = { id = id, item = item, name = info.name }
+      out[#out + 1] = { id = id, item = item, name = info.name, reagents = schematicReagents(schematic) }
     end
   end
   return out
-end
-
--- An id out of a game link: "item:12784:..." or "enchant:20034" / "spell:20034".
-local function linkId(link, kind)
-  if type(link) ~= "string" then return nil end
-  return tonumber(link:match(kind .. ":(%d+)"))
 end
 
 local function readRecipesClassic()
@@ -375,6 +404,7 @@ local function readRecipesClassic()
         name = name,
         id = linkId(recipeLink, "enchant") or linkId(recipeLink, "spell"),
         item = linkId(try(GetTradeSkillItemLink, i), "item"),
+        reagents = schematicReagents(nil, GetTradeSkillNumReagents, GetTradeSkillReagentInfo, GetTradeSkillReagentItemLink, i),
       }
     end
   end
@@ -389,7 +419,8 @@ local function readCraftsClassic()
     local name, _, kind = try(GetCraftInfo, i)
     if str(name) ~= "" and kind ~= "header" then
       local link = try(GetCraftRecipeLink, i) or try(GetCraftItemLink, i)
-      out[#out + 1] = { name = name, id = linkId(link, "enchant") or linkId(link, "spell") }
+      out[#out + 1] = { name = name, id = linkId(link, "enchant") or linkId(link, "spell"),
+        reagents = schematicReagents(nil, GetCraftNumReagents, GetCraftReagentInfo, GetCraftReagentItemLink, i) }
     end
   end
   return out
@@ -475,6 +506,42 @@ local function isBankAlt()
   return type(db.bankAlts) == "table" and db.bankAlts[readName()] == true
 end
 
+-- A new bank record keeps the scan before it (when, and each item's total) when its items changed, so the
+-- window can say what changed since.
+local function keepPrevious(new, old)
+  local function totals(b)
+    local t = {}
+    for _, tab in ipairs(type(b) == "table" and type(b.tabs) == "table" and b.tabs or {}) do
+      for _, it in ipairs(type(tab) == "table" and type(tab.items) == "table" and tab.items or {}) do
+        local id = type(it) == "table" and tonumber(it.id)
+        if id then t[id] = (t[id] or 0) + num(it.count, 1) end
+      end
+    end
+    return t
+  end
+  if type(new) ~= "table" or type(old) ~= "table" or type(old.tabs) ~= "table" then return new end
+  local a, b, same = totals(old), totals(new), true
+  for id, n in pairs(a) do if b[id] ~= n then same = false end end
+  for id, n in pairs(b) do if a[id] ~= n then same = false end end
+  if same then new.prev = old.prev else new.prev = { updated = old.updated, counts = a } end
+  return new
+end
+
+-- A guild bank tab's log, newest last: { [itemId] = { { who, kind, count } } }, three per item at most.
+local function readGuildLog(tab, log)
+  if type(GetNumGuildBankTransactions) ~= "function" then return end
+  for i = 1, num(try(GetNumGuildBankTransactions, tab), 0) do
+    local kind, who, link, count = try(GetGuildBankTransaction, tab, i)
+    local id = type(link) == "string" and tonumber(link:match("item:(%d+)"))
+    if id and (kind == "deposit" or kind == "withdraw") then
+      local list = log[id] or {}
+      list[#list + 1] = { who = str(who), kind = kind, count = num(count, 1) }
+      if #list > 3 then table.remove(list, 1) end
+      log[id] = list
+    end
+  end
+end
+
 local function readGuildTab(tab)
   local items, index = {}, {}
   local slots = num(MAX_GUILDBANK_SLOTS_PER_TAB, 98)
@@ -493,22 +560,23 @@ local function recordGuildBank()
     local n = num(try(GetNumGuildBankTabs), 0)
     if not n or n <= 0 then return end
     local current = num(try(GetCurrentGuildBankTab), 0)
-    local tabs = {}
+    local tabs, log = {}, {}
     for tab = 1, n do
-      local name, _, viewable = try(GetGuildBankTabInfo, tab)
+      local name, icon, viewable = try(GetGuildBankTabInfo, tab)
       if type(name) == "string" and (viewable == nil or viewable) then
         local items = readGuildTab(tab)
         if #items > 0 or tab == current then guildTabCache[tab] = items end
         if guildTabCache[tab] then
-          tabs[#tabs + 1] = { name = name, items = guildTabCache[tab] }
+          tabs[#tabs + 1] = { name = name, icon = icon, items = guildTabCache[tab] }
         end
+        readGuildLog(tab, log)
       end
     end
     if #tabs == 0 then return end
-    local bank = { source = "guild", updated = time(), by = readName(), tabs = tabs }
+    local bank = { source = "guild", updated = time(), by = readName(), tabs = tabs, log = next(log) and log or nil }
     local money = try(GetGuildBankMoney)
     if type(money) == "number" then bank.money = money end
-    initDB().bank = bank
+    initDB().bank = keepPrevious(bank, initDB().bank)
     if onDataChanged then onDataChanged() end
   end)
 end
@@ -518,7 +586,10 @@ local function queryGuildBankTabs()
     local n = num(try(GetNumGuildBankTabs), 0)
     for tab = 1, n do
       local _, _, viewable = try(GetGuildBankTabInfo, tab)
-      if viewable == nil or viewable then try(QueryGuildBankTab, tab) end
+      if viewable == nil or viewable then
+        try(QueryGuildBankTab, tab)
+        try(QueryGuildBankLog, tab)
+      end
     end
   end)
 end
@@ -578,7 +649,7 @@ local function recordAltBank(withBank)
     local bank = { source = "alt", updated = time(), by = me, tabs = tabs }
     local money = try(GetMoney)
     if type(money) == "number" then bank.money = money end
-    db.bank = bank
+    db.bank = keepPrevious(bank, db.bank)
     if onDataChanged then onDataChanged() end
   end)
 end
@@ -1080,7 +1151,7 @@ local function onPayload(p, who)
     local b = Sync.decodeBank(p.body)
     local stored = b and Sync.storeBank(db.shared.bank, p.subject, p.updated, b, who)
     if stored then
-      db.shared.bank = stored
+      db.shared.bank = keepPrevious(stored, db.shared.bank)
       if refreshWindows then refreshWindows() end
     end
   elseif p.kind == "A" then
@@ -1399,6 +1470,8 @@ function ui.draw(w)
     local row = w.rows[i] or ui.newRow(w, i)
     if row then
       local item = w.items[w.offset + i]
+      -- a filler row is room for the line above it (bag slots are two rows tall), shown only under it
+      if item and (item.filler or (item.slots and i == w.visible)) then item = nil end
       row.data = item
       if item then
         w.fill(w, row, item)
@@ -1467,8 +1540,8 @@ function ui.render(w)
 
   local listTop = w.noFilters and (w.filterTop + 2) or (w.filterTop - y - 26)
   w.list:ClearAllPoints()
-  w.list:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 6, listTop)
-  w.list:SetPoint("BOTTOMRIGHT", w.frame, "BOTTOMRIGHT", -24, 24)
+  w.list:SetPoint("TOPLEFT", w.frame, "TOPLEFT", w.left or 6, listTop)
+  w.list:SetPoint("BOTTOMRIGHT", w.frame, "BOTTOMRIGHT", -(w.rightInset or 24), 24)
   w.visible = math.max(1, floor((w.height + listTop - 24) / ROW_H))
   w.items = data.rows
   local maxOffset = math.max(0, #w.items - w.visible)
@@ -1488,6 +1561,7 @@ function ui.render(w)
     w.empty:Hide()
     if w.art then w.art:Hide() end
   end
+  if w.after then pcall(w.after, w, data) end
 end
 
 function ui.newRow(w, i)
@@ -1513,10 +1587,13 @@ function ui.newRow(w, i)
   row.right = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   row.right:SetPoint("RIGHT", row, "RIGHT", -4, 0)
   row.right:SetJustifyH("RIGHT")
-  try(row.RegisterForClicks, row, "LeftButtonUp")
+  try(row.RegisterForClicks, row, "LeftButtonUp", w.rightClick and "RightButtonUp" or nil)
   row:SetScript("OnEnter", function(self) if self.data then pcall(w.enter, w, self, self.data) end end)
   row:SetScript("OnLeave", hideTooltip)
-  row:SetScript("OnClick", function(self) if self.data then pcall(w.click, w, self.data, nil) end end)
+  row:SetScript("OnClick", function(self, button)
+    if button == "RightButton" and not w.rightClick then return end
+    if self.data then pcall(w.click, w, self.data, nil, button) end
+  end)
   try(row.EnableMouseWheel, row, true)
   row:SetScript("OnMouseWheel", function(_, delta) ui.scroll(w, w.offset - delta * 3) end)
   if w.decorate then w.decorate(w, row) end
@@ -1601,8 +1678,8 @@ function ui.makeView(w, host, width, height)
     end
   end
   if sb then
-    sb:SetSize(200, 20)
-    sb:SetPoint("TOPLEFT", host, "TOPLEFT", 12, -4)
+    sb:SetSize(w.searchWidth or 200, 20)
+    sb:SetPoint("TOPLEFT", host, "TOPLEFT", w.searchX or 12, -4)
     sb:SetAutoFocus(false)
     local function changed()
       w.offset = 0
@@ -1658,7 +1735,7 @@ function ui.makeView(w, host, width, height)
   w.footer:SetJustifyH("LEFT")
   w.empty = list:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
   w.empty:SetPoint("CENTER", list, "CENTER", 0, 0)
-  w.empty:SetWidth(width - 80)
+  w.empty:SetWidth(w.emptyWidth or (width - 80))
   if w.emptyArt then
     -- small and soft, above the empty-state words, never behind them
     w.art = list:CreateTexture(nil, "ARTWORK")
@@ -1672,6 +1749,7 @@ function ui.makeView(w, host, width, height)
   w.rows, w.filterButtons, w.items, w.offset, w.visible = {}, {}, {}, 0, 0
   host:SetScript("OnShow", function() pcall(ui.render, w) end)
   host:SetScript("OnHide", hideTooltip)
+  if w.make then w.make(w, host) end
   ui.windows[w.key] = w
   return true
 end
@@ -1688,6 +1766,301 @@ local function recipeTooltip(owner, item, spell, name)
   return tt
 end
 
+-- ---------------------------------------------------------- master/detail --
+-- Bank and Crafting share one shape, like the game's profession window: a list on the left (bank tabs,
+-- professions) with icons and counts, the items in the middle under foldable category headers, and the
+-- picked one on the right. These are its shared pieces: the left list, the grouping, the detail pane.
+
+-- Both tabs' list sits between the left list and the detail pane.
+ui.MD = { noFilters = true, filterTop = -30, left = 164, rightInset = 262, searchX = 170, searchWidth = 170, emptyWidth = 300 }
+function ui.md(w)
+  for k, v in pairs(ui.MD) do if w[k] == nil then w[k] = v end end
+  return w
+end
+
+-- The window's remembered settings (FantasyForceDB.windows).
+function ui.state()
+  local db = initDB()
+  if type(db.windows) ~= "table" then db.windows = {} end
+  return db.windows
+end
+
+-- An item's category from its class (GetItemInfoInstant), else from words in its name; "Other" when neither.
+ui.CLASSES = { [0] = "Consumables", [1] = "Bags", [2] = "Weapons", [3] = "Gems", [5] = "Reagents", [6] = "Ammo",
+  [7] = "Trade goods", [8] = "Enhancements", [9] = "Recipes", [12] = "Quest", [16] = "Glyphs" }
+ui.WORDS = { { "Bag$", "Bags" }, { "Potion", "Consumables" }, { "Elixir", "Consumables" }, { "Flask", "Consumables" },
+  { "Bandage", "Consumables" }, { "^Enchant ", "Enchants" }, { "^Smelt ", "Trade goods" }, { "^Bolt of", "Trade goods" },
+  { "^Transmute", "Trade goods" }, { "Armor Kit", "Enhancements" }, { "Sharpening Stone", "Enhancements" },
+  { "Weightstone", "Enhancements" } }
+function ui.category(item, name)
+  if item then
+    local _, _, sub, _, _, classID = try((C_Item and C_Item.GetItemInfoInstant) or GetItemInfoInstant, item)
+    classID = tonumber(classID)
+    if classID == 4 then return (str(sub) ~= "" and sub ~= "Miscellaneous") and (sub .. " armor") or "Armor" end
+    if classID and ui.CLASSES[classID] then return ui.CLASSES[classID] end
+  end
+  name = str(name)
+  for _, wd in ipairs(ui.WORDS) do
+    if name:find(wd[1]) then return wd[2] end
+  end
+  return "Other"
+end
+
+-- Items under their categories, alphabetical with "Other" last: { cats = { name }, items = { [cat] = list } }.
+function ui.group(items, catOf)
+  local g = { cats = {}, items = {} }
+  for _, it in ipairs(items) do
+    local c = catOf(it)
+    if not g.items[c] then
+      g.items[c] = {}
+      g.cats[#g.cats + 1] = c
+    end
+    table.insert(g.items[c], it)
+  end
+  table.sort(g.cats, function(a, b)
+    if (a == "Other") ~= (b == "Other") then return b == "Other" end
+    return a < b
+  end)
+  for _, c in ipairs(g.cats) do
+    table.sort(g.items[c], function(a, b)
+      if a.name ~= b.name then return a.name < b.name end
+      return tostring(a.tie or "") < tostring(b.tie or "")
+    end)
+  end
+  return g
+end
+
+-- A category's header row: + or -, its name in gold, how many in it.
+function ui.fillHeader(row, d)
+  row.icon:ClearAllPoints()
+  row.icon:SetPoint("LEFT", row, "LEFT", 2, 0)
+  row.icon:SetTexture(d.collapsed and "Interface\\Buttons\\UI-PlusButton-Up" or "Interface\\Buttons\\UI-MinusButton-Up")
+  row.label:SetText(d.cat)
+  row.label:SetTextColor(gameColor("NORMAL"))
+  row.right:SetText(gameColor("GRAY", true) .. d.count .. "|r")
+  if row.sel then row.sel:Hide() end
+end
+
+function ui.toggleHeader(w, d)
+  w.collapsed[d.cat] = not w.collapsed[d.cat] or nil
+  pcall(ui.render, w)
+end
+
+-- The picked row keeps the list's highlight lit.
+function ui.decorateRow(w, row)
+  row.sel = row:CreateTexture(nil, "BACKGROUND")
+  row.sel:SetAllPoints()
+  row.sel:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+  try(row.sel.SetBlendMode, row.sel, "ADD")
+  row.sel:Hide()
+end
+
+-- The remembered pick and left-list choice, loaded once; w.masterKey and w.pickKey name them.
+function ui.loadState(w)
+  if w.loaded then return end
+  local st = ui.state()
+  w.loaded, w.collapsed = true, {}
+  local m = st[w.masterKey]
+  w.master = m ~= "All" and m or nil
+  w.pick = st[w.pickKey]
+end
+
+function ui.setPick(w, key)
+  w.pick = key
+  if w.detail then w.detail.offset = 0 end
+  ui.state()[w.pickKey] = key
+  pcall(ui.render, w)
+end
+
+-- the left list: { { value (nil for All), label, icon, count } }
+function ui.masterButton(w, i)
+  local b = w.masterButtons[i]
+  if b then return b end
+  b = newFrame("Button", nil, w.frame)
+  if not b then return nil end
+  b:SetSize(150, 20)
+  b:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 6, -4 - (i - 1) * 21)
+  local hl = b:CreateTexture(nil, "HIGHLIGHT")
+  hl:SetAllPoints()
+  hl:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+  try(hl.SetBlendMode, hl, "ADD")
+  b.sel = b:CreateTexture(nil, "BACKGROUND")
+  b.sel:SetAllPoints()
+  b.sel:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+  try(b.sel.SetBlendMode, b.sel, "ADD")
+  b.icon = b:CreateTexture(nil, "ARTWORK")
+  b.icon:SetSize(18, 18)
+  b.icon:SetPoint("LEFT", b, "LEFT", 2, 0)
+  b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  b.text:SetPoint("LEFT", b.icon, "RIGHT", 6, 0)
+  b.text:SetWidth(96)
+  b.text:SetJustifyH("LEFT")
+  try(b.text.SetWordWrap, b.text, false)
+  b.count = b:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  b.count:SetPoint("RIGHT", b, "RIGHT", -4, 0)
+  b:SetScript("OnClick", function(self)
+    w.master, w.offset = self.value, 0
+    ui.state()[w.masterKey] = self.value or "All"
+    pcall(ui.render, w)
+  end)
+  w.masterButtons[i] = b
+  return b
+end
+
+function ui.drawMaster(w, entries)
+  for i, m in ipairs(entries) do
+    local b = ui.masterButton(w, i)
+    if b then
+      b.value = m.value
+      b.icon:SetTexture(m.icon or QUESTION_ICON)
+      b.text:SetText(m.label)
+      b.text:SetTextColor(gameColor(m.value == w.master and "NORMAL" or "HIGHLIGHT"))
+      b.count:SetText(tostring(m.count or 0))
+      if m.value == w.master then b.sel:Show() else b.sel:Hide() end
+      b:Show()
+    end
+  end
+  for i = #entries + 1, #w.masterButtons do w.masterButtons[i]:Hide() end
+  return #entries
+end
+
+-- the detail pane: a big icon (the item's tooltip on hover, shift-click links it), the name in its quality
+-- colour, a grey line under it, then lines: headings, and lines with an icon, a name, two small right-hand
+-- columns and a button. The wheel scrolls lines that don't fit.
+ui.DETAIL_LINES = 16
+function ui.makeDetail(w, host)
+  local d = { x = w.width - 238, offset = 0, lines = {} }
+  w.detail = d
+  d.icon = newFrame("Button", nil, host)
+  if d.icon then
+    d.icon:SetSize(37, 37)
+    d.icon:SetPoint("TOPLEFT", host, "TOPLEFT", d.x, -4)
+    d.icon.tex = d.icon:CreateTexture(nil, "ARTWORK")
+    d.icon.tex:SetAllPoints()
+    local hl = d.icon:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+    try(hl.SetBlendMode, hl, "ADD")
+    d.icon:SetScript("OnEnter", function(self)
+      local t = d.top
+      local tt = t and recipeTooltip(self, t.item, t.spell, t.name)
+      if tt then try(tt.Show, tt) end
+    end)
+    d.icon:SetScript("OnLeave", hideTooltip)
+    d.icon:SetScript("OnClick", function() if d.top and d.top.link and shiftDown() then linkInChat(d.top.link) end end)
+  end
+  d.name = host:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  d.name:SetPoint("TOPLEFT", host, "TOPLEFT", d.x + 45, -5)
+  d.name:SetWidth(185)
+  d.name:SetJustifyH("LEFT")
+  d.sub = host:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  d.sub:SetPoint("TOPLEFT", d.name, "BOTTOMLEFT", 0, -3)
+  d.sub:SetWidth(185)
+  d.sub:SetJustifyH("LEFT")
+  d.wheel = newFrame("Frame", nil, host)
+  if d.wheel then
+    try(d.wheel.EnableMouseWheel, d.wheel, true)
+    d.wheel:SetScript("OnMouseWheel", function(_, delta)
+      d.offset = math.max(0, d.offset - delta * 3)
+      ui.drawDetail(w, d.top)
+    end)
+  end
+  for i = 1, ui.DETAIL_LINES do
+    local l = { icon = host:CreateTexture(nil, "ARTWORK"), text = host:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"),
+      a = host:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"), b = host:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall"),
+      button = ui.stockButton(host, 18) }
+    l.icon:SetSize(16, 16)
+    l.text:SetJustifyH("LEFT")
+    try(l.text.SetWordWrap, l.text, false)
+    l.a:SetWidth(30)
+    l.a:SetJustifyH("RIGHT")
+    l.b:SetWidth(30)
+    l.b:SetJustifyH("RIGHT")
+    if l.button then
+      l.button:SetWidth(58)
+      l.button:SetScript("OnClick", function(self) if self.spec and self.spec.onClick then pcall(self.spec.onClick) end end)
+      ui.tip(l.button, function() return l.button.spec and l.button.spec.label end,
+        function() return l.button.spec and l.button.spec.tip end)
+    end
+    d.lines[i] = l
+  end
+  d.none = host:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  d.none:SetPoint("TOPLEFT", host, "TOPLEFT", d.x, -10)
+end
+
+-- top = { item, spell, icon, name, color = { r, g, b }, sub, link, lines = { { head, icon, text, a, b,
+-- color = "GRAY", button = { label, onClick, tip, enabled } } } }, or nil (then none, e.g. "Pick a recipe.").
+function ui.drawDetail(w, top, none)
+  local d = w.detail
+  if not d then return end
+  d.top = top
+  local function show(f, on) if f then if on then f:Show() else f:Hide() end end end
+  d.none:SetText(none or "")
+  show(d.none, not top)
+  show(d.icon, top)
+  show(d.name, top)
+  show(d.sub, top)
+  local lines = top and top.lines or {}
+  if top then
+    if d.icon then d.icon.tex:SetTexture(top.icon or QUESTION_ICON) end
+    d.name:SetText(top.name or "")
+    local c = top.color
+    if c then d.name:SetTextColor(c[1], c[2], c[3]) else d.name:SetTextColor(gameColor("HIGHLIGHT")) end
+    d.sub:SetText(top.sub or "")
+  end
+  local x, y = d.x, -50
+  local room = math.max(1, math.min(#d.lines, floor((w.height - 30 + y) / 20)))
+  d.offset = math.max(0, math.min(d.offset, #lines - room))
+  if d.wheel then
+    d.wheel:ClearAllPoints()
+    d.wheel:SetPoint("TOPLEFT", w.frame, "TOPLEFT", x, y)
+    d.wheel:SetSize(232, room * 20)
+  end
+  for i, l in ipairs(d.lines) do
+    local spec = i <= room and lines[d.offset + i]
+    local ly = y - (i - 1) * 20
+    show(l.icon, spec and spec.icon)
+    show(l.text, spec)
+    show(l.a, spec and spec.a)
+    show(l.b, spec and spec.b)
+    show(l.button, spec and spec.button)
+    if spec then
+      local tx = x + (spec.icon and 22 or 0)
+      if spec.icon then
+        l.icon:ClearAllPoints()
+        l.icon:SetPoint("TOPLEFT", w.frame, "TOPLEFT", x + 2, ly - 1)
+        l.icon:SetTexture(spec.icon)
+      end
+      l.text:ClearAllPoints()
+      l.text:SetPoint("TOPLEFT", w.frame, "TOPLEFT", tx, ly - 4)
+      l.text:SetWidth((spec.button or spec.a) and (104 - (tx - x)) or (230 - (tx - x)))
+      l.text:SetText(spec.text or "")
+      l.text:SetTextColor(gameColor(spec.head and "NORMAL" or spec.color or "HIGHLIGHT"))
+      for _, col in ipairs({ { l.a, spec.a, 130 }, { l.b, spec.b, 162 } }) do
+        if col[2] then
+          col[1]:ClearAllPoints()
+          col[1]:SetPoint("TOPRIGHT", w.frame, "TOPLEFT", x + col[3], ly - 4)
+          col[1]:SetText(col[2])
+          col[1]:SetTextColor(gameColor(spec.head and "GRAY" or "HIGHLIGHT"))
+        end
+      end
+      if l.button and spec.button then
+        l.button.spec = spec.button
+        l.button.text:SetText(spec.button.label)
+        l.button:ClearAllPoints()
+        l.button:SetPoint("TOPLEFT", w.frame, "TOPLEFT", x + 170, ly)
+        if spec.button.enabled == false then l.button:Disable() else l.button:Enable() end
+      end
+    end
+  end
+end
+
+-- What a master/detail tab makes besides the list: the left list and the detail pane.
+function ui.makeMasterDetail(w, host)
+  w.masterButtons = {}
+  ui.makeDetail(w, host)
+end
+
 -- ------------------------------------------------------------ bank window --
 
 local function bankData()
@@ -1702,59 +2075,293 @@ local function bankData()
   return own or sh
 end
 
-local bankWindow = { key = "Bank", nameWidth = 250 }
+-- The Bank: its tabs on the left (Bags and Bank for a bank alt), its items in the middle under their
+-- categories, as a list or as bag slots (Grid), and the picked item on the right: how many and where, when
+-- it was recorded, what changed since the scan before, and Ask (a whisper to the bank alt for one).
+local bankWindow = ui.md({ key = "Bank", nameWidth = 236, masterKey = "bankSource", pickKey = "bankPick" })
+bankWindow.ICONS = { All = "Interface\\Icons\\INV_Box_01", Bags = "Interface\\Icons\\INV_Misc_Bag_08",
+  Bank = "Interface\\Icons\\INV_Box_02", Tab = "Interface\\Icons\\INV_Misc_Bag_10" }
+bankWindow.SLOT, bankWindow.PER_LINE = 37, 7
 
 function bankWindow.build(w)
-  local out = { rows = {}, filters = {}, footer = "",
-    empty = "No bank yet. The bank alt types /ff bankalt." }
+  ui.loadState(w)
+  w.grid = ui.state().bankGrid and true or false
+  local out = { rows = {}, filters = {}, footer = "", empty = "No bank yet. The bank alt types /ff bankalt.", masters = {} }
   local bank = bankData()
+  w.bank, w.items_ = bank, {}
   if not bank then return out end
   local search = searchText(w)
+  local known, byId, list, all = {}, {}, {}, 0
   for _, t in ipairs(bank.tabs) do
     local tab = str(type(t) == "table" and t.name)
     if type(t) == "table" and type(t.items) == "table" then
-      out.filters[#out.filters + 1] = tab
-      if w.filter == nil or w.filter == tab then
-        for _, it in ipairs(t.items) do
-          local id = type(it) == "table" and tonumber(it.id)
-          if id then
+      known[tab] = true
+      out.masters[#out.masters + 1] = { value = tab, label = tab, count = #t.items,
+        icon = t.icon or bankWindow.ICONS[tab] or bankWindow.ICONS.Tab }
+      all = all + #t.items
+    end
+  end
+  table.insert(out.masters, 1, { value = nil, label = "All", count = all, icon = bankWindow.ICONS.All })
+  if w.master and not known[w.master] then w.master = nil end
+  -- one entry per item (All adds a tab's items to the others'), with where it is
+  for _, t in ipairs(bank.tabs) do
+    local tab = str(type(t) == "table" and t.name)
+    if type(t) == "table" and type(t.items) == "table" and (w.master == nil or w.master == tab) then
+      for _, it in ipairs(t.items) do
+        local id = type(it) == "table" and tonumber(it.id)
+        if id then
+          local e = byId[id]
+          if not e then
             local name = itemName(id) or str(it.name)
-            if name == "" then name = "Item " .. id end
-            if search == "" or name:lower():find(search, 1, true) then
-              out.rows[#out.rows + 1] = { id = id, name = name, count = floor(num(it.count, 1)), tab = tab }
-            end
+            e = { id = id, key = id, name = name ~= "" and name or ("Item " .. id), count = 0, where = {}, tie = id }
+            byId[id] = e
+            list[#list + 1] = e
           end
+          local n = floor(num(it.count, 1))
+          e.count = e.count + n
+          e.where[#e.where + 1] = { tab = tab, count = n }
         end
       end
     end
   end
-  table.sort(out.rows, function(a, b)
-    if a.name ~= b.name then return a.name < b.name end
-    return a.tab < b.tab
-  end)
-  if #out.rows == 0 then out.empty = search ~= "" and "Nothing matches." or "Nothing here." end
-  out.footer = moneyText(bank.money) .. "    Updated " .. ago(bank.updated) .. " by " .. str(bank.by)
+  local shown = {}
+  for _, e in ipairs(list) do
+    if search == "" or e.name:lower():find(search, 1, true) then shown[#shown + 1] = e end
+  end
+  local g = ui.group(shown, function(e) return ui.category(e.id, e.name) end)
+  for _, cat in ipairs(g.cats) do
+    local items = g.items[cat]
+    out.rows[#out.rows + 1] = { header = true, cat = cat, count = #items, collapsed = w.collapsed[cat] and true or false }
+    if not w.collapsed[cat] then
+      if w.grid then
+        -- bag slots, a line of them every two rows
+        for i = 1, #items, bankWindow.PER_LINE do
+          local slots = {}
+          for j = i, math.min(#items, i + bankWindow.PER_LINE - 1) do slots[#slots + 1] = items[j] end
+          out.rows[#out.rows + 1] = { slots = slots }
+          out.rows[#out.rows + 1] = { filler = true }
+        end
+      else
+        for _, e in ipairs(items) do out.rows[#out.rows + 1] = e end
+      end
+    end
+  end
+  w.items_ = shown
+  if #shown == 0 then out.empty = search ~= "" and "Nothing matches." or "Nothing here." end
+  out.footer = #shown .. (#shown == 1 and " item" or " items")
   return out
 end
 
-function bankWindow.fill(w, row, it)
-  row.icon:SetTexture(itemIcon(it.id) or QUESTION_ICON)
-  row.label:SetText(it.name)
-  row.label:SetTextColor(itemQualityColor(it.id))
-  row.right:SetText(it.count .. "   " .. gameColor("GRAY", true) .. it.tab .. "|r")
+function bankWindow.decorate(w, row)
+  ui.decorateRow(w, row)
+  row.slots = {}
 end
 
-function bankWindow.enter(w, row, it)
-  local tt = recipeTooltip(row, it.id, nil, it.name)
+-- One bag slot in the grid: the game's item button, else an icon with a count and a quality border.
+function bankWindow.slot(w, row, i)
+  local b = row.slots[i]
+  if b then return b end
+  local size = bankWindow.SLOT
+  b = newFrame("Button", nil, row, "ItemButtonTemplate")
+  local stock = b and (b.icon or b.Icon) and true or false
+  if not stock then
+    if b then b:Hide() end
+    b = newFrame("Button", nil, row)
+    if not b then return nil end
+    b.icon = b:CreateTexture(nil, "ARTWORK")
+    b.icon:SetAllPoints()
+    b.IconBorder = b:CreateTexture(nil, "OVERLAY")
+    b.IconBorder:SetAllPoints()
+    b.IconBorder:SetTexture("Interface\\Common\\WhiteIconFrame")
+    b.Count = b:CreateFontString(nil, "OVERLAY", "NumberFontNormal")
+    b.Count:SetPoint("BOTTOMRIGHT", b, "BOTTOMRIGHT", -3, 3)
+    local hl = b:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+    try(hl.SetBlendMode, hl, "ADD")
+  end
+  b.stock = stock
+  b:SetSize(size, size)
+  b:SetPoint("TOPLEFT", row, "TOPLEFT", 2 + (i - 1) * (size + 4), -1)
+  try(b.RegisterForClicks, b, "LeftButtonUp")
+  b:SetScript("OnEnter", function(self)
+    if self.entry then
+      local tt = recipeTooltip(self, self.entry.id, nil, self.entry.name)
+      if tt then try(tt.Show, tt) end
+    end
+  end)
+  b:SetScript("OnLeave", hideTooltip)
+  b:SetScript("OnClick", function(self) if self.entry then pcall(w.click, w, self.entry) end end)
+  try(b.EnableMouseWheel, b, true)
+  b:SetScript("OnMouseWheel", function(_, delta) ui.scroll(w, w.offset - delta * 3) end)
+  row.slots[i] = b
+  return b
+end
+
+function bankWindow.fillSlot(w, b, e)
+  b.entry = e
+  local icon = itemIcon(e.id) or QUESTION_ICON
+  if not (b.stock and try(SetItemButtonTexture, b, icon)) then (b.icon or b.Icon):SetTexture(icon) end
+  if b.stock and type(SetItemButtonCount) == "function" then
+    try(SetItemButtonCount, b, e.count)
+  elseif b.Count then
+    b.Count:SetText(e.count > 1 and tostring(e.count) or "")
+  end
+  local q = try(C_Item and C_Item.GetItemQualityByID, e.id)
+  if b.stock and type(SetItemButtonQuality) == "function" then
+    try(SetItemButtonQuality, b, q, e.id)
+  elseif b.IconBorder then
+    local c = type(q) == "number" and q >= 2 and ITEM_QUALITY_COLORS and ITEM_QUALITY_COLORS[q]
+    if type(c) == "table" then
+      b.IconBorder:SetVertexColor(c.r, c.g, c.b)
+      b.IconBorder:Show()
+    else
+      b.IconBorder:Hide()
+    end
+  end
+  if w.pick == e.key then try(b.LockHighlight, b) else try(b.UnlockHighlight, b) end
+  b:Show()
+end
+
+function bankWindow.fill(w, row, d)
+  for _, b in ipairs(row.slots) do b:Hide() end
+  if d.header then
+    row.label:Show()
+    row.icon:Show()
+    ui.fillHeader(row, d)
+    return
+  end
+  if d.slots then
+    row.icon:Hide()
+    row.label:Hide()
+    row.right:SetText("")
+    row.sel:Hide()
+    for i, e in ipairs(d.slots) do
+      local b = bankWindow.slot(w, row, i)
+      if b then bankWindow.fillSlot(w, b, e) end
+    end
+    return
+  end
+  row.icon:Show()
+  row.label:Show()
+  row.icon:ClearAllPoints()
+  row.icon:SetPoint("LEFT", row, "LEFT", 14, 0)
+  row.icon:SetTexture(itemIcon(d.id) or QUESTION_ICON)
+  row.label:SetText(d.name)
+  row.label:SetTextColor(itemQualityColor(d.id))
+  row.right:SetText(tostring(d.count))
+  if w.pick == d.key then row.sel:Show() else row.sel:Hide() end
+end
+
+function bankWindow.enter(w, row, d)
+  if d.header or d.slots then return end
+  local tt = recipeTooltip(row, d.id, nil, d.name)
   if tt then try(tt.Show, tt) end
 end
 
-function bankWindow.click(w, it)
-  if shiftDown() then linkInChat(itemLink(it.id)) end
+function bankWindow.click(w, d)
+  if d.header then return ui.toggleHeader(w, d) end
+  if d.slots then return end
+  if shiftDown() then
+    linkInChat(itemLink(d.id))
+    return
+  end
+  ui.setPick(w, d.key)
 end
 
 function bankWindow.isEmpty()
   return bankData() == nil
+end
+
+-- Whom to ask for an item: the bank alt, or for a guild bank the guild master (else who recorded it).
+function bankWindow.keeper(bank)
+  if bank.source == "guild" then
+    for i = 1, num(try(GetNumGuildMembers), 0) do
+      local name, _, rankIndex = try(GetGuildRosterInfo, i)
+      if rankIndex == 0 and type(name) == "string" then return stripRealm(name) end
+    end
+  end
+  return str(bank.by)
+end
+
+-- The prefilled whisper: "/w Fantasy Bankalt Hi! Could I have [Runecloth] x1?"
+function bankWindow.askText(bank, id, name)
+  return "/w " .. bankWindow.keeper(bank) .. " Hi! Could I have " .. (itemLink(id) or ("[" .. str(name) .. "]")) .. " x1?"
+end
+
+-- The picked item on the right.
+function bankWindow.describe(w, e)
+  local bank = w.bank
+  if not (e and bank) then return nil end
+  local lines = {}
+  local all = {}
+  for _, t in ipairs(bank.tabs) do
+    for _, it in ipairs(type(t) == "table" and type(t.items) == "table" and t.items or {}) do
+      if type(it) == "table" and tonumber(it.id) == e.id then all[#all + 1] = { tab = str(t.name), count = floor(num(it.count, 1)) } end
+    end
+  end
+  local total = 0
+  for _, p in ipairs(all) do
+    total = total + p.count
+    lines[#lines + 1] = { text = p.tab, a = tostring(p.count) }
+  end
+  if #all > 1 then lines[#lines + 1] = { text = "Total", a = tostring(total), color = "NORMAL" } end
+  lines[#lines + 1] = { text = "Updated " .. ago(bank.updated), color = "GRAY" }
+  lines[#lines + 1] = { text = "by " .. str(bank.by), color = "GRAY" }
+  local prev = type(bank.prev) == "table" and type(bank.prev.counts) == "table" and bank.prev or nil
+  if prev then
+    local diff = total - num(prev.counts[e.id], 0)
+    if diff ~= 0 then
+      lines[#lines + 1] = { text = (diff > 0 and "+" or "") .. diff .. " since " .. ago(prev.updated), color = diff > 0 and "GREEN" or "GRAY" }
+    end
+  end
+  local log = type(bank.log) == "table" and bank.log[e.id]
+  for _, l in ipairs(type(log) == "table" and log or {}) do
+    lines[#lines + 1] = { text = str(l.who) .. " " .. (l.kind == "withdraw" and "-" or "+") .. num(l.count, 1), color = "GRAY" }
+  end
+  local keeper = bankWindow.keeper(bank)
+  lines[#lines + 1] = { text = keeper, color = "GRAY", button = { label = "Ask", enabled = keeper ~= "" and keeper ~= readName(),
+    tip = "Whispers " .. keeper .. " for one.", onClick = function() openChat(bankWindow.askText(bank, e.id, e.name)) end } }
+  return { item = e.id, icon = itemIcon(e.id), name = e.name, color = { itemQualityColor(e.id) }, link = itemLink(e.id),
+    sub = ui.category(e.id, e.name), lines = lines }
+end
+
+function bankWindow.make(w, host)
+  ui.makeMasterDetail(w, host)
+  w.gold = host:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  w.gold:SetJustifyH("LEFT")
+  w.view = ui.stockButton(host, 20)
+  if w.view then
+    w.view:SetWidth(56)
+    w.view:SetPoint("TOPLEFT", host, "TOPLEFT", 350, -4)
+    w.view:SetScript("OnClick", function()
+      local st = ui.state()
+      st.bankGrid = not st.bankGrid or nil
+      w.offset = 0
+      pcall(ui.render, w)
+    end)
+    ui.tip(w.view, "View", "A list, or bag slots.")
+  end
+end
+
+function bankWindow.after(w, data)
+  local n = ui.drawMaster(w, data.masters or {})
+  w.gold:ClearAllPoints()
+  w.gold:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 12, -4 - n * 21 - 8)
+  w.gold:SetText(w.bank and moneyText(w.bank.money) or "")
+  if w.view then w.view.text:SetText(w.grid and "List" or "Grid") end
+  local entry
+  for _, e in ipairs(w.items_ or {}) do
+    if e.key == w.pick then entry = e break end
+  end
+  for _, d in ipairs(entry and {} or data.rows) do
+    entry = (d.slots and d.slots[1]) or ((not d.header and not d.filler) and d) or nil
+    if entry then break end
+  end
+  local changed = (entry and entry.key) ~= w.pick
+  w.pick = entry and entry.key or nil
+  if changed then ui.draw(w) end
+  ui.drawDetail(w, bankWindow.describe(w, entry), w.bank and "Pick an item." or "")
 end
 
 -- ---------------------------------------------------------- crafts window --
@@ -1769,7 +2376,7 @@ local function craftsIndex()
     local key = prof .. "#" .. (r.id and ("s" .. r.id) or r.item and ("i" .. r.item) or ("n" .. str(r.name):lower()))
     local e = byKey[key]
     if not e then
-      e = { prof = prof, id = r.id, item = r.item, name = r.name, crafters = {}, seen = {} }
+      e = { key = key, prof = prof, id = r.id, item = r.item, name = r.name, crafters = {}, seen = {} }
       byKey[key] = e
       list[#list + 1] = e
       profs[prof] = true
@@ -1818,155 +2425,229 @@ local function recipeName(e)
   return e.id and ("Recipe " .. e.id) or ("Item " .. str(e.item))
 end
 
-local craftsWindow = { key = "Crafts", nameWidth = 210 }
+-- Crafting, in the same shape as the Bank: the professions on the left with their icons and recipe counts,
+-- the recipes in the middle under their categories, each with its icon and how many can make it, and the
+-- picked recipe on the right: what it takes, and everyone who can make it, online first, each with Whisper.
+-- Search (recipes and crafters) and Online above the list.
+local craftsWindow = ui.md({ key = "Crafts", nameWidth = 236, masterKey = "craftProf", pickKey = "craftPick" })
+
+-- The professions' spells (their icons in the game) and icon paths to fall back on.
+craftsWindow.PROFS = {
+  Alchemy = { 2259, "Trade_Alchemy" }, Blacksmithing = { 2018, "Trade_BlackSmithing" },
+  Enchanting = { 7411, "Trade_Engraving" }, Engineering = { 4036, "Trade_Engineering" },
+  Leatherworking = { 2108, "INV_Misc_ArmorKit_17" }, Tailoring = { 3908, "Trade_Tailoring" },
+  Cooking = { 2550, "INV_Misc_Food_15" }, ["First Aid"] = { 3273, "Spell_Holy_SealOfSacrifice" },
+  Mining = { 2575, "Trade_Mining" }, Herbalism = { 2366, "Spell_Nature_NatureTouchGrow" },
+  Skinning = { 8613, "INV_Misc_Pelt_Wolf_01" }, Fishing = { 7620, "Trade_Fishing" },
+}
+craftsWindow.ALL_ICON = "Interface\\Icons\\INV_Misc_Book_09"
+
+function craftsWindow.profIcon(prof)
+  local p = craftsWindow.PROFS[prof]
+  if not p then return QUESTION_ICON end
+  return try(C_Spell and C_Spell.GetSpellTexture, p[1]) or try(GetSpellTexture, p[1]) or ("Interface\\Icons\\" .. p[2])
+end
+
+function craftsWindow.category(e)
+  if not e.cat then e.cat = ui.category(e.item, recipeName(e)) end
+  return e.cat
+end
+
+-- Who can make a recipe, online first (then those with an alt online to whisper), then by skill.
+function craftsWindow.who(e, online, groups)
+  local who = {}
+  for _, c in ipairs(e.crafters) do
+    local via
+    if not online[c.name] and not c.own and c.group then
+      for _, other in ipairs(groups[c.group] or {}) do
+        if other ~= c.name and online[other] then via = other break end
+      end
+    end
+    who[#who + 1] = { name = c.name, class = c.class, skill = c.skill, online = online[c.name] and true or false, via = via }
+  end
+  table.sort(who, function(a, b)
+    local ra = a.online and 2 or a.via and 1 or 0
+    local rb = b.online and 2 or b.via and 1 or 0
+    if ra ~= rb then return ra > rb end
+    if a.skill ~= b.skill then return a.skill > b.skill end
+    return a.name < b.name
+  end)
+  return who
+end
+
+-- What a recipe takes: as recorded with this account's recipes, else as the game describes it.
+function craftsWindow.reagents(e)
+  if e.reagents ~= nil then return e.reagents or nil end
+  local found
+  for _, rec in pairs(initDB().characters) do
+    local list = type(rec) == "table" and type(rec.recipes) == "table" and rec.recipes[e.prof]
+    for _, r in ipairs(type(list) == "table" and list or {}) do
+      if type(r) == "table" and type(r.reagents) == "table" and ((e.id and r.id == e.id) or (e.item and r.item == e.item)) then
+        found = r.reagents
+        break
+      end
+    end
+    if found then break end
+  end
+  if not found and e.id and C_TradeSkillUI then found = schematicReagents(try(C_TradeSkillUI.GetRecipeSchematic, e.id, false)) end
+  e.reagents = found or false
+  return found
+end
 
 function craftsWindow.build(w)
   if not ui.crafts then
     local list, profs, groups = craftsIndex()
     ui.crafts = { list = list, profs = profs, groups = groups }
   end
+  ui.loadState(w)
   local idx = ui.crafts
-  local out = { rows = {}, filters = idx.profs, footer = "",
-    empty = "No recipes yet. Open your professions once." }
-  local online = onlineNames()
-  local search = searchText(w)
-  local crafterNames = {}
+  local known, counts = {}, { All = 0 }
+  for _, p in ipairs(idx.profs) do known[p] = true end
+  if w.master and not known[w.master] then w.master = nil end
+  local out = { rows = {}, filters = {}, footer = "", empty = "No recipes yet. Open your professions once.", masters = {} }
+  local online, search = onlineNames(), searchText(w)
+  local shown, crafterNames = {}, {}
   for _, e in ipairs(idx.list) do
-    if w.filter == nil or w.filter == e.prof then
+    counts[e.prof] = (counts[e.prof] or 0) + 1
+    counts.All = counts.All + 1
+    if w.master == nil or w.master == e.prof then
       local name = recipeName(e)
-      if search == "" or name:lower():find(search, 1, true) then
-        local who = {}
-        for _, c in ipairs(e.crafters) do
-          crafterNames[c.name] = true
-          local via
-          if not online[c.name] and not c.own and c.group then
-            for _, other in ipairs(idx.groups[c.group] or {}) do
-              if other ~= c.name and online[other] then via = other break end
-            end
-          end
-          who[#who + 1] = { name = c.name, class = c.class, skill = c.skill, online = online[c.name] and true or false, via = via }
+      local who = craftsWindow.who(e, online, idx.groups)
+      local match = search == "" or name:lower():find(search, 1, true)
+      if not match then
+        for _, c in ipairs(who) do
+          if c.name:lower():find(search, 1, true) then match = true break end
         end
-        table.sort(who, function(a, b)
-          local ra = a.online and 2 or a.via and 1 or 0
-          local rb = b.online and 2 or b.via and 1 or 0
-          if ra ~= rb then return ra > rb end
-          if a.skill ~= b.skill then return a.skill > b.skill end
-          return a.name < b.name
-        end)
-        out.rows[#out.rows + 1] = { e = e, name = name, prof = e.prof, who = who }
+      end
+      local anyOn = who[1] and (who[1].online or who[1].via) and true or false
+      if match and (not w.onlineOnly or anyOn) then
+        shown[#shown + 1] = { e = e, key = e.key, name = name, who = who, on = anyOn, tie = e.prof }
+        for _, c in ipairs(who) do crafterNames[c.name] = true end
       end
     end
   end
-  table.sort(out.rows, function(a, b)
-    if a.name ~= b.name then return a.name < b.name end
-    return a.prof < b.prof
-  end)
-  if #idx.list > 0 and #out.rows == 0 then out.empty = "Nothing matches." end
-  local nCrafters = 0
-  for _ in pairs(crafterNames) do nCrafters = nCrafters + 1 end
-  out.footer = #out.rows .. (#out.rows == 1 and " recipe, " or " recipes, ") .. nCrafters .. (nCrafters == 1 and " crafter" or " crafters")
+  out.masters[1] = { value = nil, label = "All", count = counts.All, icon = craftsWindow.ALL_ICON }
+  for _, p in ipairs(idx.profs) do
+    out.masters[#out.masters + 1] = { value = p, label = p, count = counts[p], icon = craftsWindow.profIcon(p) }
+  end
+  local g = ui.group(shown, function(d) return craftsWindow.category(d.e) end)
+  for _, cat in ipairs(g.cats) do
+    local list = g.items[cat]
+    out.rows[#out.rows + 1] = { header = true, cat = cat, count = #list, collapsed = w.collapsed[cat] and true or false }
+    if not w.collapsed[cat] then
+      for _, d in ipairs(list) do out.rows[#out.rows + 1] = d end
+    end
+  end
+  w.items_ = shown
+  if #idx.list > 0 and #shown == 0 then out.empty = "Nothing matches." end
+  local n = 0
+  for _ in pairs(crafterNames) do n = n + 1 end
+  out.footer = #shown .. (#shown == 1 and " recipe, " or " recipes, ") .. n .. (n == 1 and " crafter" or " crafters")
   return out
-end
-
-local MAX_NAMES = 3
-
-local function crafterText(c)
-  if c.online then return ONLINE_ICON .. classHex(c.class) .. c.name .. "|r" end
-  if c.via then return ONLINE_ICON .. gameColor("HIGHLIGHT", true) .. c.name .. " (" .. c.via .. ")|r" end
-  return gameColor("GRAY", true) .. c.name .. "|r"
 end
 
 local function recipeLink(e)
   return (e.item and itemLink(e.item)) or (e.id and spellLink(e.id)) or nil
 end
 
--- Whispers a crafter (or the online alt for them); shift-click links the recipe instead.
-function craftsWindow.click(w, d, c)
+local function recipeIcon(e)
+  return (e.item and itemIcon(e.item)) or (e.id and spellIcon(e.id)) or QUESTION_ICON
+end
+
+craftsWindow.decorate = ui.decorateRow
+
+function craftsWindow.fill(w, row, d)
+  if d.header then return ui.fillHeader(row, d) end
+  local e = d.e
+  row.icon:ClearAllPoints()
+  row.icon:SetPoint("LEFT", row, "LEFT", 14, 0)
+  row.icon:SetTexture(recipeIcon(e))
+  row.label:SetText(d.name)
+  if e.item then row.label:SetTextColor(itemQualityColor(e.item)) else row.label:SetTextColor(gameColor("HIGHLIGHT")) end
+  row.right:SetText((d.on and ONLINE_ICON or "") .. gameColor(d.on and "HIGHLIGHT" or "GRAY", true) .. #d.who .. "|r")
+  if w.pick == e.key then row.sel:Show() else row.sel:Hide() end
+end
+
+function craftsWindow.enter(w, row, d)
+  if d.header then return end
+  local tt = recipeTooltip(row, d.e.item, d.e.id, d.name)
+  if tt then try(tt.Show, tt) end
+end
+
+-- A category opens or closes; a recipe shows on the right (shift-click links it).
+function craftsWindow.click(w, d)
+  if d.header then return ui.toggleHeader(w, d) end
   if shiftDown() then
     linkInChat(recipeLink(d.e))
     return
   end
-  if not c then
-    c = d.who[1]
-    if not (c and (c.online or c.via)) then return end -- nobody online to whisper
-  end
-  if c.name == readName() then return end
-  whisper(c.via or c.name)
-end
-
-function craftsWindow.enter(w, row, d)
-  local e = d.e
-  local tt = recipeTooltip(row, e.item, e.id, d.name)
-  if not tt then return end
-  try(tt.AddLine, tt, " ")
-  try(tt.AddLine, tt, d.prof .. ": who can make it", gameColor("NORMAL"))
-  for _, c in ipairs(d.who) do
-    local line = c.name .. " (" .. c.skill .. ")"
-    if c.online then
-      try(tt.AddLine, tt, line .. ", online", gameColor("GREEN"))
-    elseif c.via then
-      try(tt.AddLine, tt, line .. ", on " .. c.via, gameColor("HIGHLIGHT"))
-    else
-      try(tt.AddLine, tt, line, gameColor("GRAY"))
-    end
-  end
-  try(tt.Show, tt)
-end
-
-function craftsWindow.decorate(w, row)
-  row.names = {}
-  for i = 1, MAX_NAMES do
-    local b = newFrame("Button", nil, row)
-    if b then
-      b:SetHeight(ROW_H)
-      b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-      b.text:SetPoint("LEFT", b, "LEFT", 0, 0)
-      try(b.RegisterForClicks, b, "LeftButtonUp")
-      b:SetScript("OnClick", function(self) if row.data then pcall(w.click, w, row.data, self.crafter) end end)
-      b:SetScript("OnEnter", function() if row.data then pcall(w.enter, w, row, row.data) end end)
-      b:SetScript("OnLeave", hideTooltip)
-      try(b.EnableMouseWheel, b, true)
-      b:SetScript("OnMouseWheel", function(_, delta) ui.scroll(w, w.offset - delta * 3) end)
-      row.names[i] = b
-    end
-  end
-end
-
-function craftsWindow.fill(w, row, d)
-  local e = d.e
-  row.icon:SetTexture((e.item and itemIcon(e.item)) or (e.id and spellIcon(e.id)) or QUESTION_ICON)
-  row.label:SetText(d.name)
-  if e.item then row.label:SetTextColor(itemQualityColor(e.item)) else row.label:SetTextColor(gameColor("HIGHLIGHT")) end
-  local x = w.nameWidth + 30
-  local room = w.width - 40 - x - 30
-  local shownCount = 0
-  for i, b in ipairs(row.names or {}) do
-    local c = d.who[i]
-    if c then
-      b.crafter = c
-      b.text:SetText(crafterText(c))
-      local bw = num(try(b.text.GetStringWidth, b.text), 60) + 8
-      if shownCount > 0 and bw > room then
-        b:Hide()
-      else
-        b:SetWidth(bw)
-        b:ClearAllPoints()
-        b:SetPoint("LEFT", row, "LEFT", x, 0)
-        b:Show()
-        x, room = x + bw, room - bw
-        shownCount = shownCount + 1
-      end
-    else
-      b.crafter = nil
-      b:Hide()
-    end
-  end
-  local more = #d.who - shownCount
-  row.right:SetText(more > 0 and (gameColor("GRAY", true) .. "+" .. more .. "|r") or "")
+  ui.setPick(w, d.e.key)
 end
 
 function craftsWindow.isEmpty()
   return next(initDB().shared.crafters) == nil
+end
+
+-- A crafter's level, from what guildmates shared or this account's own record.
+function craftsWindow.level(name)
+  local e = mainIndex()[name]
+  if e and type(e.char) == "table" and num(e.char.level, 0) > 0 then return e.char.level end
+  local rec = initDB().characters[name]
+  return type(rec) == "table" and rec.level or nil
+end
+
+-- The picked recipe on the right: what it takes, then who can make it.
+function craftsWindow.describe(w, e)
+  if not e then return nil end
+  local lines = {}
+  local reagents = craftsWindow.reagents(e)
+  if reagents then
+    lines[#lines + 1] = { head = true, text = "Reagents" }
+    for _, g in ipairs(reagents) do
+      local n = (g.item and itemName(g.item)) or str(g.name)
+      lines[#lines + 1] = { icon = (g.item and itemIcon(g.item)) or QUESTION_ICON,
+        text = n .. (num(g.count, 1) > 1 and (gameColor("GRAY", true) .. " x" .. g.count .. "|r") or "") }
+    end
+  end
+  lines[#lines + 1] = { head = true, text = "Crafters", a = "Lvl", b = "Skill" }
+  for _, c in ipairs(craftsWindow.who(e, onlineNames(), ui.crafts and ui.crafts.groups or {})) do
+    local color = c.online and classHex(c.class) or gameColor(c.via and "HIGHLIGHT" or "GRAY", true)
+    local lvl = craftsWindow.level(c.name)
+    lines[#lines + 1] = { text = ((c.online or c.via) and ONLINE_ICON or "") .. color .. c.name .. "|r",
+      a = lvl and tostring(lvl) or "", b = tostring(c.skill), crafter = c,
+      button = { label = "Whisper", enabled = (c.online or c.via) and c.name ~= readName() and true or false,
+        tip = c.via and ("On " .. c.via .. ", online") or (not c.online and "Offline" or nil),
+        onClick = function() whisper(c.via or c.name) end } }
+  end
+  return { item = e.item, spell = e.id, icon = recipeIcon(e), name = recipeName(e), link = recipeLink(e),
+    color = e.item and { itemQualityColor(e.item) } or nil, sub = e.prof .. ", " .. craftsWindow.category(e), lines = lines }
+end
+
+function craftsWindow.make(w, host)
+  ui.makeMasterDetail(w, host)
+  w.onlineBox = ui.check(host, 350, -2, "Online", function(on)
+    w.onlineOnly, w.offset = on, 0
+    pcall(ui.render, w)
+  end, "Only recipes someone online can make.")
+end
+
+-- After each redraw: the professions, and the picked recipe (remembered; else the first one shown).
+function craftsWindow.after(w, data)
+  ui.drawMaster(w, data.masters or {})
+  if w.onlineBox then w.onlineBox:SetChecked(w.onlineOnly and true or false) end
+  local entry
+  for _, d in ipairs(w.items_ or {}) do
+    if d.key == w.pick then entry = d.e break end
+  end
+  if not entry then
+    for _, d in ipairs(data.rows) do
+      if not d.header then entry = d.e break end
+    end
+  end
+  local changed = (entry and entry.key) ~= w.pick
+  w.pick = entry and entry.key or nil
+  if changed then ui.draw(w) end
+  ui.drawDetail(w, craftsWindow.describe(w, entry), "Pick a recipe.")
 end
 
 refreshWindows = function()
@@ -2128,14 +2809,14 @@ function ui.makeSite(page, width, height)
     if not try(ReloadUI) then try(C_UI and C_UI.Reload) end
   end, "Reloads your interface so the game writes the file. It only writes it on reload or logout.")
   line(14, -44, 16, "GameFontNormal"):SetText("2")
-  s.path = ui.copyBox(page, 40, -40, 530,
+  s.path = ui.copyBox(page, 40, -40, width - 52,
     "The file to upload. Ctrl+C copies. Your account folder is the only one in WTF\\Account, or the one named after your account.")
   if s.path then s.path.setValue(FILE_PATH) end
   line(14, -74, 16, "GameFontNormal"):SetText("3")
   line(34, -76, 150):SetText("Drop it on My characters")
-  s.address = ui.copyBox(page, 190, -70, 380, "The guild website. Ctrl+C copies.")
+  s.address = ui.copyBox(page, 190, -70, width - 202, "The guild website. Ctrl+C copies.")
   if s.address then s.address.setValue(SITE_URL) end
-  s.officer = line(34, -100, 540, "GameFontDisableSmall")
+  s.officer = line(34, -100, width - 60, "GameFontDisableSmall")
   local h = page:CreateFontString(nil, "OVERLAY", "GameFontNormal")
   h:SetPoint("TOPLEFT", page, "TOPLEFT", 12, -116)
   h:SetText("Characters")
@@ -2157,62 +2838,256 @@ function ui.refreshSite()
 end
 
 -- ------------------------------------------------------------ guild view --
--- Guildmates running the addon: each main with its alts, online first (from the A payloads).
+-- Guildmates running the addon, like the game's guild roster: columns to sort by (Name, Role, Class,
+-- Level; again reverses, and the pick is remembered), each main with its alts under it. One row of
+-- filters: Online, the classes, the roles, and Alts (off lists mains only). Right-click one of your own
+-- characters to set its roles.
 
-local guildView = { key = "Guild", nameWidth = 300, noFilters = true,
+-- Tank, healer, damage: the group finder's role icons, else a spell icon each.
+ui.ROLES = {
+  tank = { name = "Tank", coords = { 0, 67 / 256, 67 / 256, 134 / 256 }, icon = "Interface\\Icons\\Ability_Defend" },
+  healer = { name = "Healer", coords = { 67 / 256, 134 / 256, 0, 67 / 256 }, icon = "Interface\\Icons\\Spell_Holy_HolyBolt" },
+  dps = { name = "Damage", coords = { 67 / 256, 134 / 256, 67 / 256, 134 / 256 }, icon = "Interface\\Icons\\INV_Sword_04" },
+}
+ui.ROLE_ORDER = { "tank", "healer", "dps" }
+ui.ROLE_FILE = "Interface\\LFGFrame\\UI-LFG-ICON-ROLES"
+ui.CLASS_ORDER = { "WARRIOR", "PALADIN", "HUNTER", "ROGUE", "PRIEST", "SHAMAN", "MAGE", "WARLOCK", "DRUID" }
+
+function ui.roleTexture(tex, role)
+  local r = ui.ROLES[role]
+  if not r then return end
+  if try(tex.SetTexture, tex, ui.ROLE_FILE) == false then -- not on this client
+    tex:SetTexture(r.icon)
+    try(tex.SetTexCoord, tex, 0.08, 0.92, 0.08, 0.92)
+  else
+    try(tex.SetTexCoord, tex, r.coords[1], r.coords[2], r.coords[3], r.coords[4])
+  end
+end
+
+function ui.roleNames(roles)
+  local names = {}
+  for _, r in ipairs(roles or {}) do names[#names + 1] = ui.ROLES[r] and ui.ROLES[r].name or r end
+  return table.concat(names, ", ")
+end
+
+function ui.className(class)
+  local n = type(LOCALIZED_CLASS_NAMES_MALE) == "table" and LOCALIZED_CLASS_NAMES_MALE[class]
+  if type(n) == "string" and n ~= "" then return n end
+  class = str(class)
+  return class:sub(1, 1) .. class:sub(2):lower()
+end
+
+function ui.classTexture(tex, class)
+  local coords = CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[class]
+  if type(coords) ~= "table" then
+    tex:SetTexture(nil)
+    return
+  end
+  tex:SetTexture("Interface\\TargetingFrame\\UI-Classes-Circles")
+  try(tex.SetTexCoord, tex, coords[1], coords[2], coords[3], coords[4])
+end
+
+-- A small icon that turns on and off (filters, roles): on wears the game's checked-button glow; while
+-- others in its row are on, one that's off is greyed.
+function ui.toggleIcon(parent, size, setIcon, title, text, onClick)
+  local b = newFrame("Button", nil, parent)
+  if not b then return nil end
+  b:SetSize(size, size)
+  b.icon = b:CreateTexture(nil, "ARTWORK")
+  b.icon:SetAllPoints()
+  setIcon(b.icon)
+  b.glow = b:CreateTexture(nil, "OVERLAY")
+  b.glow:SetAllPoints()
+  b.glow:SetTexture("Interface\\Buttons\\CheckButtonHilight")
+  try(b.glow.SetBlendMode, b.glow, "ADD")
+  b.glow:Hide()
+  local hl = b:CreateTexture(nil, "HIGHLIGHT")
+  hl:SetAllPoints()
+  hl:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+  try(hl.SetBlendMode, hl, "ADD")
+  b:SetScript("OnClick", function(self) pcall(onClick, self) end)
+  ui.tip(b, title, text)
+  return b
+end
+
+function ui.setToggle(b, on, dim)
+  if not b then return end
+  b.on = on and true or false
+  if b.on then b.glow:Show() else b.glow:Hide() end
+  local grey = dim and not b.on
+  try(b.icon.SetDesaturated, b.icon, grey)
+  try(b.icon.SetAlpha, b.icon, grey and 0.45 or 1)
+end
+
+-- The game's roster column header (the Who list's), else a stock button.
+function ui.columnHeader(parent, name, x, y, width, label, onClick)
+  local b = newFrame("Button", name, parent, "WhoFrameColumnHeaderTemplate")
+    or newFrame("Button", name .. "G", parent, "GuildFrameColumnHeaderTemplate")
+  if b then
+    b:SetText(label)
+    b.text = b.Text or try(b.GetFontString, b)
+    if not (type(WhoFrameColumn_SetWidth) == "function" and pcall(WhoFrameColumn_SetWidth, b, width)) then b:SetWidth(width) end
+  else
+    b = ui.stockButton(parent, 22)
+    if not b then return nil end
+    b.text:SetText(label)
+    b:SetWidth(width)
+  end
+  b:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
+  b:SetScript("OnClick", function() pcall(onClick) end)
+  return b
+end
+
+local guildView = { key = "Guild", nameWidth = 300, noFilters = true, filterTop = -58, searchWidth = 150, rightClick = true,
   emptyArt = "Interface\\AddOns\\FantasyForce\\Media\\Logo" }
+guildView.COLUMNS = { { "name", "Name" }, { "role", "Role" }, { "class", "Class" }, { "level", "Level" } }
+guildView.ROLE_RANK = { tank = "1", healer = "2", dps = "3" }
+
+function guildView.sort()
+  local st = ui.state()
+  if type(st.guildSort) ~= "table" then st.guildSort = { key = "name" } end
+  return st.guildSort
+end
+
+function guildView.sortBy(key)
+  local s = guildView.sort()
+  if s.key == key then
+    s.desc = not s.desc or nil
+  else
+    s.key, s.desc = key, nil
+  end
+end
+
+function guildView.value(c, key)
+  if key == "level" then return c.level end
+  if key == "class" then return ui.className(c.class) end
+  if key == "role" then
+    local v = ""
+    for _, r in ipairs(c.roles) do v = v .. (guildView.ROLE_RANK[r] or "4") end
+    return v == "" and "9" or v
+  end
+  return c.name
+end
+
+function guildView.less(s)
+  return function(a, b)
+    local va, vb = guildView.value(a, s.key), guildView.value(b, s.key)
+    if va ~= vb then
+      if s.desc then return va > vb end
+      return va < vb
+    end
+    return a.name < b.name
+  end
+end
+
+function guildView.passes(w, c, search)
+  if search ~= "" and not c.name:lower():find(search, 1, true) then return false end
+  if w.onlineOnly and not c.online then return false end
+  if not w.showAlts and not c.isMain then return false end
+  if next(w.classes) and not w.classes[c.class] then return false end
+  if next(w.roles) then
+    for _, r in ipairs(c.roles) do
+      if w.roles[r] then return true end
+    end
+    return false
+  end
+  return true
+end
 
 function guildView.build(w)
   local out = { rows = {}, filters = {}, footer = "", empty = "No guildmates with the addon yet." }
-  local index, online, search = mainIndex(), onlineNames(), searchText(w)
+  local index, online, search, own = mainIndex(), onlineNames(), searchText(w), initDB().characters
   local groups, list = {}, {}
   for name, e in pairs(index) do
     local g = groups[e.main]
     if not g then
-      g = { main = e.main, chars = {}, online = false, match = search == "" }
+      g = { main = e.main, chars = {}, online = false }
       groups[e.main] = g
       list[#list + 1] = g
     end
     local c = type(e.char) == "table" and e.char or {}
     local on = online[name] and true or false
-    g.chars[#g.chars + 1] = { name = name, class = str(c.class), level = num(c.level, 0), profs = c.profs, online = on,
-      isMain = name == e.main, main = e.main, group = g }
+    local ch = { name = name, class = str(c.class), level = num(c.level, 0), profs = c.profs, online = on,
+      roles = Sync and Sync.orderRoles(c.roles) or {}, isMain = name == e.main, main = e.main, group = g,
+      own = type(own[name]) == "table" }
+    g.chars[#g.chars + 1] = ch
+    if ch.isMain then g.mainChar = ch end
     if on then g.online = true end
-    if not g.match and name:lower():find(search, 1, true) then g.match = true end
   end
-  table.sort(list, function(a, b)
-    if a.online ~= b.online then return a.online end
-    return a.main < b.main
-  end)
-  local playing = 0
+  local s = guildView.sort()
+  local less = guildView.less(s)
+  for _, g in ipairs(list) do
+    table.sort(g.chars, less)
+    g.mainChar = g.mainChar or g.chars[1]
+  end
+  table.sort(list, function(a, b) return less(a.mainChar, b.mainChar) end)
+  local playing, shown = 0, 0
+  local filtered = search ~= "" or w.onlineOnly or not w.showAlts or next(w.classes) or next(w.roles)
   for _, g in ipairs(list) do
     if g.online then playing = playing + 1 end
-    if g.match then
-      table.sort(g.chars, function(a, b)
-        if a.isMain ~= b.isMain then return a.isMain end
-        if a.online ~= b.online then return a.online end
-        if a.level ~= b.level then return a.level > b.level end
-        return a.name < b.name
-      end)
-      for _, c in ipairs(g.chars) do out.rows[#out.rows + 1] = c end
+    local mainShown = guildView.passes(w, g.mainChar, search)
+    local any = false
+    if mainShown then
+      out.rows[#out.rows + 1] = g.mainChar
+      any = true
     end
+    for _, c in ipairs(g.chars) do
+      if c ~= g.mainChar and guildView.passes(w, c, search) then
+        c.under = mainShown -- indented under its main, else on its own with "alt of"
+        out.rows[#out.rows + 1] = c
+        any = true
+      end
+    end
+    if any then shown = shown + 1 end
   end
   if #list > 0 and #out.rows == 0 then out.empty = "Nothing matches." end
-  out.footer = #list .. (#list == 1 and " player, " or " players, ") .. playing .. " online"
+  if filtered then
+    out.footer = shown .. " of " .. #list
+  else
+    out.footer = #list .. (#list == 1 and " player, " or " players, ") .. playing .. " online"
+  end
   return out
 end
 
-function guildView.fill(w, row, c)
-  local coords = CLASS_ICON_TCOORDS and CLASS_ICON_TCOORDS[c.class]
-  if type(coords) == "table" then
-    row.icon:SetTexture("Interface\\TargetingFrame\\UI-Classes-Circles")
-    try(row.icon.SetTexCoord, row.icon, coords[1], coords[2], coords[3], coords[4])
-  else
-    row.icon:SetTexture(nil)
+function guildView.decorate(w, row)
+  local c = w.cols
+  row.roleIcons = {}
+  for i = 1, 3 do
+    local t = row:CreateTexture(nil, "ARTWORK")
+    t:SetSize(14, 14)
+    t:SetPoint("LEFT", row, "LEFT", c.name + 6 + (i - 1) * 16, 0)
+    row.roleIcons[i] = t
   end
+  row.class = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  row.class:SetPoint("LEFT", row, "LEFT", c.name + c.role + 8, 0)
+  row.class:SetWidth(c.class - 12)
+  row.class:SetJustifyH("LEFT")
+  row.right:ClearAllPoints()
+  row.right:SetPoint("LEFT", row, "LEFT", c.name + c.role + c.class + 8, 0)
+  row.right:SetJustifyH("LEFT")
+end
+
+function guildView.fill(w, row, c)
+  local indent = (not c.isMain and c.under) and 16 or 0
+  row.icon:ClearAllPoints()
+  row.icon:SetPoint("LEFT", row, "LEFT", 2 + indent, 0)
+  ui.classTexture(row.icon, c.class)
   local name = c.online and (classHex(c.class) .. c.name .. "|r") or (gameColor("GRAY", true) .. c.name .. "|r")
-  row.label:SetText((c.isMain and "" or "      ") .. (c.online and ONLINE_ICON or "") .. name)
+  local note = (not c.isMain and not c.under) and (gameColor("GRAY", true) .. "  alt of " .. c.main .. "|r") or ""
+  row.label:SetText((c.online and ONLINE_ICON or "") .. name .. note)
+  for i, t in ipairs(row.roleIcons) do
+    local r = c.roles[i]
+    if r then
+      ui.roleTexture(t, r)
+      t:Show()
+    else
+      t:Hide()
+    end
+  end
+  row.class:SetText(ui.className(c.class))
+  row.class:SetTextColor(gameColor(c.online and "HIGHLIGHT" or "GRAY"))
   row.right:SetText(c.level > 0 and tostring(c.level) or "")
+  row.right:SetTextColor(gameColor(c.online and "HIGHLIGHT" or "GRAY"))
 end
 
 function guildView.enter(w, row, c)
@@ -2221,18 +3096,26 @@ function guildView.enter(w, row, c)
   try(tt.SetOwner, tt, row, "ANCHOR_RIGHT")
   try(tt.SetText, tt, c.name)
   try(tt.AddLine, tt, c.isMain and "Main" or ("Alt of " .. c.main), gameColor("NORMAL"))
-  if c.level > 0 then try(tt.AddLine, tt, "Level " .. c.level, gameColor("HIGHLIGHT")) end
+  if c.level > 0 then try(tt.AddLine, tt, "Level " .. c.level .. " " .. ui.className(c.class), gameColor("HIGHLIGHT")) end
+  if #c.roles > 0 then try(tt.AddLine, tt, ui.roleNames(c.roles), gameColor("HIGHLIGHT")) end
   local profs = profText(c)
   if profs ~= "" then
     local r, g, b = gameColor("HIGHLIGHT")
     try(tt.AddLine, tt, profs, r, g, b, true)
   end
-  if c.online then try(tt.AddLine, tt, "Click to whisper", gameColor("GRAY")) end
+  if c.online and c.name ~= readName() then try(tt.AddLine, tt, "Click to whisper", gameColor("GRAY")) end
+  if c.own then try(tt.AddLine, tt, "Right-click for roles", gameColor("GRAY")) end
   try(tt.Show, tt)
 end
 
--- Whispers the character, or whichever of the player's characters is online.
-function guildView.click(w, c)
+-- Click whispers the character (or whichever of the player's characters is online); right-click on one
+-- of your own sets its roles.
+function guildView.click(w, c, _, button)
+  if button == "RightButton" then
+    if c.own then guildView.openPopup(w, c) end
+    return
+  end
+  if w.popup then w.popup:Hide() end
   local to = c.online and c.name or nil
   if not to then
     for _, o in ipairs(c.group.chars) do
@@ -2244,6 +3127,147 @@ end
 
 function guildView.isEmpty()
   return next(initDB().shared.accounts) == nil
+end
+
+-- The roles popup: the character's name and its three role toggles, on a tooltip's backdrop.
+function guildView.openPopup(w, c)
+  local p = w.popup
+  if not p then
+    p = newFrame("Frame", nil, w.frame, "BackdropTemplate") or newFrame("Frame", nil, w.frame)
+    if not p then return end
+    p:SetSize(150, 54)
+    try(p.SetFrameStrata, p, "DIALOG")
+    try(p.EnableMouse, p, true)
+    if p.SetBackdrop then
+      pcall(p.SetBackdrop, p, { bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 16,
+        insets = { left = 4, right = 4, top = 4, bottom = 4 } })
+      local bg = TOOLTIP_DEFAULT_BACKGROUND_COLOR
+      if type(bg) == "table" and bg.r then try(p.SetBackdropColor, p, bg.r, bg.g, bg.b, 1) else try(p.SetBackdropColor, p, 0, 0, 0, 1) end
+    end
+    p.title = p:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    p.title:SetPoint("TOPLEFT", p, "TOPLEFT", 10, -9)
+    p.title:SetWidth(116)
+    p.title:SetJustifyH("LEFT")
+    local close = newFrame("Button", nil, p, "UIPanelCloseButton")
+    if close then
+      close:SetSize(20, 20)
+      close:SetPoint("TOPRIGHT", p, "TOPRIGHT", 0, 0)
+    end
+    p.buttons = {}
+    for i, role in ipairs(ui.ROLE_ORDER) do
+      local b = ui.toggleIcon(p, 22, function(t) ui.roleTexture(t, role) end, ui.ROLES[role].name, nil,
+        function(self) ui.setRole(p.name, role, not self.on) end)
+      if b then
+        b:SetPoint("TOPLEFT", p, "TOPLEFT", 10 + (i - 1) * 28, -24)
+        p.buttons[role] = b
+      end
+    end
+    w.popup = p
+  end
+  p.name = c.name
+  p:ClearAllPoints()
+  p:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 6 + w.cols.name - 4, w.filterTop - 10)
+  for i, row in ipairs(w.rows) do
+    if row.data == c then p:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 6 + w.cols.name - 4, w.filterTop + 2 - i * ROW_H) end
+  end
+  guildView.drawPopup(w)
+  p:Show()
+end
+
+function guildView.drawPopup(w)
+  local p = w.popup
+  local rec = initDB().characters[p.name]
+  local set = {}
+  for _, r in ipairs(Sync and Sync.rolesFor(rec) or {}) do set[r] = true end
+  p.title:SetText(p.name)
+  for role, b in pairs(p.buttons) do ui.setToggle(b, set[role], false) end
+end
+
+-- Sets or clears one of this account's characters' roles, then shares it.
+function ui.setRole(name, role, on)
+  local rec = initDB().characters[name]
+  if type(rec) ~= "table" or not Sync or not ui.ROLES[role] then return end
+  local set = {}
+  for _, r in ipairs(Sync.rolesFor(rec)) do set[r] = true end
+  set[role] = on and true or nil
+  local list = {}
+  for _, r in ipairs(Sync.ROLES) do
+    if set[r] then list[#list + 1] = r end
+  end
+  rec.roles, rec.rolesSet = list, true
+  alts.index = nil
+  if onDataChanged then onDataChanged() end
+  ui.changed()
+  local w = ui.windows.Guild
+  if w then
+    pcall(ui.render, w)
+    if w.popup and ui.visible(w.popup) then guildView.drawPopup(w) end
+  end
+end
+
+function guildView.make(w, host)
+  w.classes, w.roles, w.showAlts = {}, {}, true
+  local function changed()
+    w.offset = 0
+    pcall(ui.render, w)
+  end
+  w.onlineBox = ui.check(host, 170, -2, "Online", function(on)
+    w.onlineOnly = on
+    changed()
+  end, "Only who's online now.")
+  w.classButtons, w.roleButtons = {}, {}
+  for i, class in ipairs(ui.CLASS_ORDER) do
+    local b = ui.toggleIcon(host, 20, function(t) ui.classTexture(t, class) end, ui.className(class), nil, function()
+      w.classes[class] = not w.classes[class] or nil
+      changed()
+    end)
+    if b then
+      b:SetPoint("TOPLEFT", host, "TOPLEFT", 246 + (i - 1) * 22, -4)
+      w.classButtons[class] = b
+    end
+  end
+  for i, role in ipairs(ui.ROLE_ORDER) do
+    local b = ui.toggleIcon(host, 20, function(t) ui.roleTexture(t, role) end, ui.ROLES[role].name, nil, function()
+      w.roles[role] = not w.roles[role] or nil
+      changed()
+    end)
+    if b then
+      b:SetPoint("TOPLEFT", host, "TOPLEFT", 458 + (i - 1) * 22, -4)
+      w.roleButtons[role] = b
+    end
+  end
+  w.altsBox = ui.check(host, 536, -2, "Alts", function(on)
+    w.showAlts = on
+    changed()
+  end, "Off lists mains only.")
+  -- the columns: Name takes what the others leave
+  local listW = w.width - 30
+  w.cols = { role = 80, class = 150, level = 60 }
+  w.cols.name = listW - w.cols.role - w.cols.class - w.cols.level
+  w.nameWidth = w.cols.name - 30
+  w.headers = {}
+  local x = 6
+  for _, col in ipairs(guildView.COLUMNS) do
+    local key = col[1]
+    w.headers[key] = ui.columnHeader(host, "FantasyForceGuildCol" .. col[2], x, -32, w.cols[key], col[2], function()
+      guildView.sortBy(key)
+      changed()
+    end)
+    x = x + w.cols[key]
+  end
+  host:HookScript("OnShow", function() if w.popup then w.popup:Hide() end end)
+end
+
+function guildView.after(w)
+  local s = guildView.sort()
+  for key, b in pairs(w.headers) do
+    if b.text then b.text:SetTextColor(gameColor(key == s.key and "NORMAL" or "HIGHLIGHT")) end
+  end
+  for class, b in pairs(w.classButtons) do ui.setToggle(b, w.classes[class], next(w.classes) ~= nil) end
+  for role, b in pairs(w.roleButtons) do ui.setToggle(b, w.roles[role], next(w.roles) ~= nil) end
+  if w.onlineBox then w.onlineBox:SetChecked(w.onlineOnly and true or false) end
+  if w.altsBox then w.altsBox:SetChecked(w.showAlts and true or false) end
 end
 
 -- --------------------------------------------------------------- commands --
@@ -2299,7 +3323,7 @@ end
 -- state. Each returns the line the command prints; controls print nothing.
 
 local cmd = {}
-local panel = { pages = {}, tabs = {}, W = 600, H = 520,
+local panel = { pages = {}, tabs = {}, W = 760, H = 520,
   views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView },
   ICON = "Interface\\AddOns\\FantasyForce\\Media\\Icon",
   TABS = { { key = "Bank", label = "Bank" }, { key = "Crafts", label = "Crafting" }, { key = "Guild", label = "Guild" },
@@ -2602,6 +3626,14 @@ function panel.makeOptions(page)
   o.minimap = ui.check(page, 120, -54, "Minimap button", function(on) cmd.minimap(on) end,
     "A round button on the minimap that opens this window.")
   o.moreCharacter = ui.more(page, 270, -57, function(open) panel.refreshOptions() end)
+  o.rolesLabel = line(330, -32, 40)
+  o.rolesLabel:SetText("Roles")
+  o.roles = {}
+  for i, role in ipairs(ui.ROLE_ORDER) do
+    o.roles[role] = ui.toggleIcon(page, 22, function(t) ui.roleTexture(t, role) end, ui.ROLES[role].name,
+      "Guildmates see your roles.", function(self) ui.setRole(readName(), role, not self.on) end)
+    if o.roles[role] then o.roles[role]:SetPoint("TOPLEFT", page, "TOPLEFT", 372 + (i - 1) * 28, -27) end
+  end
   o.lootLabel = line(16, -86, 70)
   o.lootLabel:SetText("Raid loot")
   o.loot = ui.choiceRow(page, 90, -82, { { "rare", "Rare+", "Record rare (blue) raid loot and better." },
@@ -2619,7 +3651,7 @@ function panel.makeOptions(page)
     { "thick", "Thick", "More words, and now and then a closing line." } },
     function(v) local A = accentApi() if A then A.setStrength(v) end end)
   o.moreAccent = ui.more(page, 140, -227, function(open) panel.refreshOptions() end)
-  o.preview = line(16, -254, 556, "GameFontDisableSmall")
+  o.preview = line(16, -254, 700, "GameFontDisableSmall")
   o.chats = {}
   for i, c in ipairs(CHAT_LABELS) do
     o.chats[c[1]] = ui.check(page, 12 + (i - 1) * 78, -276, c[2], function(on)
@@ -2656,6 +3688,9 @@ function panel.refreshOptions()
     o.main:SetText("Main: " .. me .. " " .. ui.STAR)
   end
   setChecked(o.bankAlt, isBankAlt())
+  local roles = {}
+  for _, r in ipairs(Sync and Sync.rolesFor(db.characters[me]) or {}) do roles[r] = true end
+  for role, b in pairs(o.roles) do ui.setToggle(b, roles[role], false) end
   setChecked(o.minimap, not (type(db.minimap) == "table" and db.minimap.hide))
   local moreChar = o.moreCharacter and o.moreCharacter.open
   showIf(o.lootLabel, moreChar)

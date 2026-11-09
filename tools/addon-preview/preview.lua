@@ -108,6 +108,10 @@ local function shareGuild()
       end
     end
   end
+  -- the scan before the bank's newest, so the Bank tab can say what changed since
+  if world.bankBefore then
+    deliver("B", world.bankBefore.by, world.bankBefore.updated, S.encodeBank(world.bankBefore), world.bankBefore.sender)
+  end
   deliver("B", world.bank.by, world.bank.updated, S.encodeBank(world.bank), world.bank.sender)
 end
 
@@ -268,6 +272,8 @@ function P.snapshot()
               rn.text = r._text or ""
               rn.font = r._font
               rn.c = color(r._color)
+              -- a disabled button's label in the game's grey (its DisabledFontObject)
+              if f._disabled and r == rawget(f, "Text") then rn.font, rn.c = "GameFontDisable", nil end
               rn.jh = r._justifyH
               rn.jv = r._justifyV
               rn.sp = r._spacing

@@ -15,7 +15,10 @@
 --   sendAddon(prefix, msg, chan) -> code, onSend(msg, chatType, lang, target), onChat(text, r, g, b),
 --   openChat(text), insertLink(link), reload(), cursor() -> x, y, measure(text, font, wrapWidth, spacing) -> w, h,
 --   screen = { w, h }, minimap = { x, y, size } (its centre from the screen's top right), pcall,
---   noParse (no chat box hook to post-hook), noSendChat (no SendChatMessage).
+--   noParse (no chat box hook to post-hook), noSendChat (no SendChatMessage),
+--   missingTemplates = { [templateName] = true } (a client without them: CreateFrame errors, as the game does).
+-- items may also say classID, subclassID, type and sub (GetItemInfoInstant); tradeskill recipes may say
+-- reagents = { { id, count } }.
 -- Frames keep their state in underscore fields (_text, _shown, _checked, _scripts, _lines, _points ...), which
 -- the tests read directly.
 
@@ -49,7 +52,8 @@ FakeGame.QUALITY_COLORS = {
   [3] = { r = 0, g = 0.44, b = 0.87 }, [4] = { r = 0.64, g = 0.21, b = 0.93 }, [5] = { r = 1, g = 0.5, b = 0 },
 }
 local FONTS = { "GameFontNormal", "GameFontHighlight", "GameFontNormalSmall", "GameFontHighlightSmall",
-  "GameFontDisableSmall", "GameFontNormalLarge", "GameFontHighlightLarge", "GameFontDisable", "ChatFontNormal" }
+  "GameFontDisableSmall", "GameFontNormalLarge", "GameFontHighlightLarge", "GameFontDisable", "ChatFontNormal",
+  "NumberFontNormal" }
 
 local function copy(t)
   local out = {}
@@ -64,6 +68,7 @@ end
 function FakeGame.newClient(o)
   local name = o.name
   local client = { name = name, eventFrames = {}, chat = {}, online = true, textures = {}, frames = {}, updaters = {}, nextId = 0 }
+  client.opts = o -- what it was made with (tests change bags and the like through it)
   local measure = o.measure or function(text) return #tostring(text or "") * 5, 12 end
   client.measure = measure
   local screen = o.screen or { w = 1440, h = 870 }
@@ -90,10 +95,14 @@ function FakeGame.newClient(o)
   -- ------------------------------------------------------------- frames --
   local Frame = {}
   local noop = function() end
+  -- a template's named pieces: nil unless the template made them (any other capitalised key is a method)
+  local PIECES = { Text = true, TitleText = true, TitleBg = true, CloseButton = true, Inset = true, InsetBg = true,
+    Instructions = true, Icon = true, IconBorder = true, Count = true, NineSlice = true, Left = true, Middle = true,
+    Right = true, Bg = true }
   local mt = { __index = function(_, k)
     local m = Frame[k]
     if m ~= nil then return m end
-    if type(k) == "string" and k:match("^[A-Z]") then return noop end
+    if type(k) == "string" and k:match("^[A-Z]") and not PIECES[k] then return noop end
   end }
   local env -- the addon's globals, below
 
@@ -149,7 +158,8 @@ function FakeGame.newClient(o)
       return
     end
     f._text = t
-    if f.Text and f.Text ~= f and (f._kind == "Button" or f._kind == "CheckButton") then f.Text:SetText(t) end
+    local fs = rawget(f, "Text")
+    if fs and fs ~= f and (f._kind == "Button" or f._kind == "CheckButton") then fs:SetText(t) end
     if f._scripts.OnTextChanged then f._scripts.OnTextChanged(f, false) end
   end
   function Frame.Type(f, t) f._text = t if f._scripts.OnTextChanged then f._scripts.OnTextChanged(f, true) end end
@@ -169,8 +179,8 @@ function FakeGame.newClient(o)
   function Frame.SetSpacing(f, s) f._spacing = s end
   function Frame.GetStringWidth(f) return (measure(f._text or "", f._font, nil, f._spacing)) end
   function Frame.GetStringHeight(f) local _, h = measure(f._text or "", f._font, nil, f._spacing) return h end
-  function Frame.GetFontString(f) return f.Text or f end
-  function Frame.GetTextWidth(f) local fs = f.Text or f return (measure(fs._text or "", fs._font, nil)) end
+  function Frame.GetFontString(f) return rawget(f, "Text") or f end
+  function Frame.GetTextWidth(f) local fs = rawget(f, "Text") or f return (measure(fs._text or "", fs._font, nil)) end
 
   -- regions
   function Frame.CreateTexture(f, _, layer, _, sublevel) return mock("Texture", nil, f, layer or "ARTWORK", sublevel) end
@@ -438,6 +448,32 @@ function FakeGame.newClient(o)
     f.Instructions._isInstructions = true
   end
   function TEMPLATES.BackdropTemplate() end
+  -- the Who list's column header, its label 8 in (the preview draws its tab art from the template name)
+  function TEMPLATES.WhoFrameColumnHeaderTemplate(f)
+    f:SetSize(10, 24)
+    f._font = "GameFontHighlightSmall"
+    f.Text = fontString(f, "GameFontHighlightSmall")
+    f.Text:SetPoint("LEFT", f, "LEFT", 8, 0)
+  end
+  TEMPLATES.GuildFrameColumnHeaderTemplate = TEMPLATES.WhoFrameColumnHeaderTemplate
+  -- a bag slot: its icon, its stack count, and a quality border shown for green and up
+  function TEMPLATES.ItemButtonTemplate(f)
+    f:SetSize(37, 37)
+    f.icon = f:CreateTexture(nil, "BORDER")
+    f.icon:SetAllPoints()
+    f.Icon = f.icon
+    f.Count = fontString(f, "NumberFontNormal")
+    f.Count:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -5, 2)
+    f.Count:Hide()
+    f.IconBorder = f:CreateTexture(nil, "OVERLAY")
+    f.IconBorder:SetAllPoints()
+    f.IconBorder:SetTexture("Interface\\Common\\WhiteIconFrame")
+    f.IconBorder:Hide()
+    local hl = f:CreateTexture(nil, "HIGHLIGHT")
+    hl:SetAllPoints()
+    hl:SetTexture("Interface\\Buttons\\ButtonHilight-Square")
+    hl:SetBlendMode("ADD")
+  end
 
   -- ---------------------------------------------------------------- env --
   env = setmetatable({}, { __index = _G })
@@ -458,7 +494,9 @@ function FakeGame.newClient(o)
     if kind == "EditBox" then f._font = "ChatFontNormal" f._autoFocus = true end
     for t in tostring(template or ""):gmatch("[^,%s]+") do
       local build = TEMPLATES[t]
-      if build then build(f) end
+      -- like the game: a template this client doesn't have is an error
+      if not build or (o.missingTemplates and o.missingTemplates[t]) then error("Couldn't find inherited node \"" .. t .. "\"", 2) end
+      build(f)
     end
     if fname then env[fname] = f end
     return f
@@ -585,10 +623,40 @@ function FakeGame.newClient(o)
       if it then return it.name, itemLink(id), it.quality or 1 end
     end,
     RequestLoadItemDataByID = function() end,
+    -- id, type, subtype, equip slot, icon, class id, subclass id (items say classID and sub)
+    GetItemInfoInstant = function(id)
+      local it = item(id)
+      if not it then return nil end
+      return tonumber(id), it.type or "", it.sub or "", "", it.icon or 134400, it.classID, it.subclassID
+    end,
   }
+  env.GetItemInfoInstant = env.C_Item.GetItemInfoInstant
+  env.LOCALIZED_CLASS_NAMES_MALE = { WARRIOR = "Warrior", PALADIN = "Paladin", HUNTER = "Hunter", ROGUE = "Rogue",
+    PRIEST = "Priest", SHAMAN = "Shaman", MAGE = "Mage", WARLOCK = "Warlock", DRUID = "Druid" }
+  env.TOOLTIP_DEFAULT_BACKGROUND_COLOR = { r = 0, g = 0, b = 0 }
+  env.WhoFrameColumn_SetWidth = function(f, width)
+    f:SetWidth(width)
+    local mid = f._name and env[f._name .. "Middle"]
+    if mid then mid:SetWidth(width - 9) end
+  end
+  env.SetItemButtonTexture = function(b, tex) b.icon:SetTexture(tex) b.icon:Show() end
+  env.SetItemButtonCount = function(b, n)
+    n = tonumber(n) or 0
+    b.Count:SetText(n > 1 and tostring(n) or "")
+    if n > 1 then b.Count:Show() else b.Count:Hide() end
+  end
+  env.SetItemButtonQuality = function(b, q)
+    local c = type(q) == "number" and q >= 2 and FakeGame.QUALITY_COLORS[q]
+    if c then
+      b.IconBorder:SetVertexColor(c.r, c.g, c.b)
+      b.IconBorder:Show()
+    else
+      b.IconBorder:Hide()
+    end
+  end
   env.C_Spell = {
     GetSpellName = function(id) local s = spell(id) return s and s.name end,
-    GetSpellTexture = function(id) local s = spell(id) return s and s.icon or 136240 end,
+    GetSpellTexture = function(id) local s = spell(id) return s and (s.icon or 136240) or nil end,
     GetSpellLink = function(id)
       local s = spell(id)
       return "|cff71d5ff|Hspell:" .. id .. "|h[" .. (s and s.name or "x") .. "]|h|r"
@@ -611,6 +679,14 @@ function FakeGame.newClient(o)
     env.GetTradeSkillInfo = function(i) return ts.list[i].name, "optimal" end
     env.GetTradeSkillRecipeLink = function(i) return "|cffffd000|Henchant:" .. ts.list[i].id .. "|h[x]|h|r" end
     env.GetTradeSkillItemLink = function(i) local it = ts.list[i].item return it and ("|cffffffff|Hitem:" .. it .. "::::|h[x]|h|r") or nil end
+    -- reagents = { { id, count } } on a recipe
+    env.GetTradeSkillNumReagents = function(i) return #(ts.list[i].reagents or {}) end
+    env.GetTradeSkillReagentInfo = function(i, j)
+      local r = ts.list[i].reagents[j]
+      local it = item(r.id)
+      return it and it.name or nil, it and it.icon or nil, r.count, 0
+    end
+    env.GetTradeSkillReagentItemLink = function(i, j) return itemLink(ts.list[i].reagents[j].id) end
   end
   env.FantasyForceDB = o.db
   env.FantasyForceCharDB = o.charDB

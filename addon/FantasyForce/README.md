@@ -6,7 +6,9 @@ A small addon for World of Warcraft: Forever that quietly records your character
 
 Per character on this account: name, level, class, race, faction, spec (the talent tree with the most points) and points per tree, every profession and secondary skill with its skill level, guild and guild rank.
 
-Recipes: the game only lists them while a profession window is open, so open each profession once on each character (and again after learning new ones). Only your own: a linked or guild recipe list is never recorded.
+Recipes: the game only lists them while a profession window is open, so open each profession once on each character (and again after learning new ones), with what each takes (its reagents and counts) where the game says. Only your own: a linked or guild recipe list is never recorded.
+
+Roles: each character's Tank, Healer and Damage, set on the Options tab or by right-clicking your own character on the Guild tab. Until you pick, they follow the spec (the website's rule: Protection warriors and paladins and bear druids tank; Holy paladins and priests, Discipline priests, Restoration shamans and druids heal; any other spec is damage; no spec known, no roles).
 
 Once a minute at most, when the server sends the guild roster: every member's name, rank, level, class, public note and online status (and days since last online). Officer notes are never read.
 
@@ -20,11 +22,13 @@ Raids: while you are in a raid group inside a raid instance, one record per raid
 
 `/ff` (or the round guild icon on the minimap) opens one window, anywhere. Drag it to move it (it remembers where), Escape or `/ff` closes it. The guild's icon sits on its corner; the header has your character's name (a star on your main) and two small icons: the speech bubble turns your accent on or off (the same as `/accent`), the "i" shows every command. Tabs along the bottom:
 
-- **Bank** (`/ff bank`): the guild bank. One row per item with its icon, name, count and tab; a search box and a button per tab; the gold and when the bank alt last updated it. Hover for the item's tooltip; shift-click links it. On the bank alt's account it shows your own record, otherwise the newest one shared by the guild.
-- **Crafting** (`/ff crafts`): who in the guild can make what. A button per profession, a search box, and one row per recipe with who can make it, online people first. Someone offline whose alt is online shows as "Name (Alt)", and whispering goes to the alt. Hover for the item and every crafter's skill; click a name to whisper, click the row to whisper the first one online, shift-click to link.
-- **Guild** (`/ff guild`): everyone running the addon, each main with its alts under it, online players first. Hover for level and professions; click to whisper.
+Bank and Crafting share one shape, like the game's profession window: a list on the left, the items in the middle under foldable categories (from the item's class: Consumables, Trade goods, Armor by type, Weapons, Bags, Recipes, Quest; else from words in the name; Other last), and the picked one on the right. Both remember what was picked.
+
+- **Bank** (`/ff bank`): the guild bank. Left: All, then each tab (Bags and Bank for a bank alt) with its item count, and the gold. Middle: each item once with its icon, name in its quality colour and count; Grid shows them as bag slots instead. Right: the item, how many and where (Bags 12, Bank 38), when it was recorded and by whom, what changed since the scan before ("+20 since 2 days ago"), a real guild bank's last deposits and withdrawals, and Ask, which starts a whisper to the bank alt (for a guild bank, the guild master) asking for one, with the item's link. Hover for the item's tooltip; shift-click links it. On the bank alt's account it shows your own record, otherwise the newest one shared by the guild.
+- **Crafting** (`/ff crafts`): who in the guild can make what. Left: All, then each profession with its icon and recipe count. Middle: the recipes with how many can make them (a green dot when one is online); search finds recipes and crafters, Online keeps what someone online can make. Right: the recipe, what it takes, and everyone who can make it, online first, with level, skill and a Whisper button. Someone offline whose alt is online is whispered on the alt. Shift-click links.
+- **Guild** (`/ff guild`): everyone running the addon, like the game's roster: Name, Role, Class and Level columns (click to sort, again to reverse; remembered), each main with its alts under it. Filters in one row: Online, the nine classes, the three roles (none picked means all), and Alts (off lists mains only); the footer then says "5 of 13". Hover for level, roles and professions; click to whisper; right-click your own character to set its roles.
 - **Website** (`/ff site`): three steps to put your characters on the site: 1 Save (reloads, so the game writes the file), 2 the file's path to copy, 3 drop it on My characters at the site's address (to copy). Under them, this account's characters: a star on the main, a warning when a profession's recipes aren't recorded yet (hover: "Open Tailoring once"). Officers also see what else their file carries (guild list, bank, raids).
-- **Options** (`/ff options`): Character (Set main, Bank alt, Minimap button; More: raid loot), Chat (Mains in chat), Accent (the accent, Light or Thick, a one-line preview; More: which chats). Each control does what its command does, and the window follows the commands too.
+- **Options** (`/ff options`): Character (Set main, Roles, Bank alt, Minimap button; More: raid loot), Chat (Mains in chat), Accent (the accent, Light or Thick, a one-line preview; More: which chats). Each control does what its command does, and the window follows the commands too.
 
 ## Mains and alts
 
@@ -41,7 +45,7 @@ The windows show what guildmates' addons share over the guild's hidden addon cha
 
 - Each player's addon shares its own account's characters that are in this guild: their professions with skill, and their recipes (as spell and item ids). A character in another guild is never shared.
 - The bank alt's addon shares the bank: tab names, each item and count, the gold, and when it was recorded.
-- Each account shares its characters in this guild (name, class, level, professions with skill) and which is the main.
+- Each account shares its characters in this guild (name, class, level, professions with skill, roles) and which is the main. Roles go last as letters (`=TD`); an addon from before roles shows them as an odd extra profession until it's updated.
 - When: shortly after you log in (a random 5 to 20 seconds, only what changed since it last went out), 10 seconds after something changes (a profession window opened, the bank alt's bags or bank changed), and when someone asks. About a minute after you log in, and when you open a window, the addon asks the guild for anything newer than what you have, at most once an hour.
 - Anyone online can answer for someone who's offline, so you see the bank even when the bank alt isn't on. Only one copy goes out: whoever starts first, the others stay quiet.
 - Sending is paced at about one short message a second (the game's own limit), so it never floods or gets you disconnected. A big recipe list is 5 to 8 messages.
@@ -82,6 +86,15 @@ FantasyForceDB.shared.accounts = {                            -- what guildmates
               { name = "Bob", class = "ROGUE", level = 42, profs = {} } } },
 }
 ```
+
+Roles, for the site, on each of this account's characters (always the roles in effect: the player's pick, else the spec's):
+
+```lua
+FantasyForceDB.characters["Morwen"].roles = { "healer", "dps" }  -- any of "tank", "healer", "dps", in that order
+FantasyForceDB.characters["Morwen"].rolesSet = true             -- picked by the player (absent: from the spec)
+```
+
+Guildmates' roles are in `shared.accounts` too, as `roles` on each of their `chars`.
 
 `mainOf` is the simple one to read: this account's characters in the current guild plus every guildmate who runs the addon, rebuilt whenever something changes. `shared.accounts` has the details (`from` is who passed it on, `heard` when; account ids are random and only group characters together). If two accounts list the same character (it moved), the newer `updated` wins.
 

@@ -256,12 +256,57 @@ end
 
 -- ---------------------------------------------------------------- accounts --
 
--- account = { main = "Name", chars = { { name, class, level, profs = { { name, skill } } } } }
+-- ------------------------------------------------------------------ roles --
+-- Tank, healer, damage: a character's own pick (rec.roles with rec.rolesSet), else its spec's usual job
+-- (the website's rule), else none. Shared as letters (T, H, D) after a character's professions.
+
+S.ROLES = { "tank", "healer", "dps" }
+local ROLE_LETTER = { tank = "T", healer = "H", dps = "D" }
+local LETTER_ROLE = { T = "tank", H = "healer", D = "dps" }
+local SPEC_ROLES = {
+  WARRIOR = { Protection = "tank" }, PALADIN = { Holy = "healer", Protection = "tank" },
+  PRIEST = { Discipline = "healer", Holy = "healer" }, SHAMAN = { Restoration = "healer" },
+  DRUID = { ["Feral (bear)"] = "tank", Guardian = "tank", Restoration = "healer" },
+}
+
+-- A list of roles in tank, healer, dps order, unknown ones dropped.
+function S.orderRoles(list)
+  local set, out = {}, {}
+  for _, r in ipairs(type(list) == "table" and list or {}) do set[r] = true end
+  for _, r in ipairs(S.ROLES) do if set[r] then out[#out + 1] = r end end
+  return out
+end
+
+function S.rolesFor(rec)
+  if type(rec) ~= "table" then return {} end
+  if rec.rolesSet and type(rec.roles) == "table" then return S.orderRoles(rec.roles) end
+  local spec = type(rec.spec) == "string" and rec.spec or ""
+  if spec == "" then return {} end
+  local byClass = SPEC_ROLES[type(rec.class) == "string" and rec.class or ""]
+  return { byClass and byClass[spec] or "dps" }
+end
+
+function S.encodeRoles(list)
+  local out = ""
+  for _, r in ipairs(S.orderRoles(list)) do out = out .. ROLE_LETTER[r] end
+  return out
+end
+
+function S.decodeRoles(s)
+  local out = {}
+  for l in tostring(s or ""):gmatch("[THD]") do out[#out + 1] = LETTER_ROLE[l] end
+  return S.orderRoles(out)
+end
+
+-- account = { main = "Name", chars = { { name, class, level, profs = { { name, skill } }, roles = { "tank" } } } }
+-- Roles go last in a character's fields as "=" and their letters ("=TD"), only when it has any.
 function S.encodeAccount(a)
   local parts = { S.esc(a.main or "") }
   for _, c in ipairs(a.chars or {}) do
     local fields = { S.esc(c.name or ""), S.esc(c.class or ""), S.b36(c.level) }
     for _, p in ipairs(c.profs or {}) do fields[#fields + 1] = S.esc(p.name or "") .. ":" .. S.b36(p.skill) end
+    local roles = S.encodeRoles(c.roles)
+    if roles ~= "" then fields[#fields + 1] = "=" .. roles end
     parts[#parts + 1] = concat(fields, ";")
   end
   return concat(parts, "~")
@@ -273,11 +318,15 @@ function S.decodeAccount(body)
   local a = { main = S.unesc(parts[1]), chars = {} }
   for i = 2, #parts do
     local f = split(parts[i], ";")
-    local c = { name = S.unesc(f[1]), class = S.unesc(f[2]), level = S.unb36(f[3]) or 0, profs = {} }
+    local c = { name = S.unesc(f[1]), class = S.unesc(f[2]), level = S.unb36(f[3]) or 0, profs = {}, roles = {} }
     for j = 4, #f do
-      local p = split(f[j], ":")
-      local pname = S.unesc(p[1])
-      if pname ~= "" then c.profs[#c.profs + 1] = { name = pname, skill = S.unb36(p[2]) or 0 } end
+      if strsub(f[j], 1, 1) == "=" then
+        c.roles = S.decodeRoles(strsub(f[j], 2))
+      else
+        local p = split(f[j], ":")
+        local pname = S.unesc(p[1])
+        if pname ~= "" then c.profs[#c.profs + 1] = { name = pname, skill = S.unb36(p[2]) or 0 } end
+      end
     end
     if c.name ~= "" then a.chars[#a.chars + 1] = c end
   end
@@ -293,7 +342,7 @@ function S.accountFromCharacters(characters, guild, chosen)
   for name, rec in pairs(characters or {}) do
     if type(rec) == "table" and type(name) == "string" and name ~= "" and rec.guild == guild then
       local c = { name = name, class = type(rec.class) == "string" and rec.class or "", level = tonumber(rec.level) or 0,
-        profs = {}, played = tonumber(rec.updated) or 0 }
+        profs = {}, played = tonumber(rec.updated) or 0, roles = S.rolesFor(rec) }
       for _, p in ipairs(type(rec.professions) == "table" and rec.professions or {}) do
         if type(p) == "table" and type(p.name) == "string" and p.name ~= "" then
           c.profs[#c.profs + 1] = { name = p.name, skill = tonumber(p.skill) or 0 }

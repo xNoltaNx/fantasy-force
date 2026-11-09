@@ -20,17 +20,34 @@
     GameFontNormal: [12, '#ffd100'], GameFontHighlight: [12, '#ffffff'], GameFontDisable: [12, '#808080'],
     GameFontNormalSmall: [10, '#ffd100'], GameFontHighlightSmall: [10, '#ffffff'], GameFontDisableSmall: [10, '#808080'],
     GameFontNormalLarge: [16, '#ffd100'], GameFontHighlightLarge: [16, '#ffffff'], ChatFontNormal: [14, '#ffffff', true],
+    NumberFontNormal: [13, '#ffffff', true],
   };
   const fontOf = (name) => FONTS[name] || FONTS.GameFontNormal;
   const fontCss = (name) => { const f = fontOf(name); return `${f[0]}px ${f[2] ? CHATFONT : FRIZ}`; };
   const lineHeight = (name) => Math.round(fontOf(name)[0] * 1.25);
 
   // ------------------------------------------------------------- textures --
-  const ICONS = 'https://wow.zamimg.com/images/wow/icons/';
+  // the game's icons, put in data.js by build.mjs (the question mark for one it couldn't get)
+  const iconUrl = (name) => D.icons[name] || D.icons.inv_misc_questionmark || null;
   const FILE_IDS = { 134400: 'inv_misc_questionmark', 136240: 'trade_alchemy' };
   const svg = (body, vb = '0 0 32 32') => 'data:image/svg+xml,' + encodeURIComponent(`<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb}">${body}</svg>`);
+  // the group finder's role icons: tank, healer and damage in a 256 sheet of 67 px cells, as the game lays them out
+  const roleCell = (x, y, body) => `<g transform="translate(${x} ${y})"><circle cx="33.5" cy="33.5" r="30" fill="#1b1206" stroke="#c9a14a" stroke-width="3"/>${body}</g>`;
+  const ROLES_SVG = svg(
+    roleCell(0, 67, '<path d="M33.5 13l16 6v13c0 11-7 18-16 22-9-4-16-11-16-22V19z" fill="#3d6fd6" stroke="#e8edf7" stroke-width="3"/>')
+    + roleCell(67, 0, '<path d="M27 14h13v13h13v13H40v13H27V40H14V27h13z" fill="#38c938" stroke="#eaffea" stroke-width="2.5"/>')
+    + roleCell(67, 67, '<path d="M46 12l6 6-22 22-4 1 1-4zM20 38l9 9-4 4-3-3-5 5-3-3 5-5-3-3z" fill="#e04a2a" stroke="#ffe2d6" stroke-width="2"/>'),
+    '0 0 256 256');
+  // A white square frame tinted by the texture's vertex colour (an item's quality border).
+  const iconFrame = (vc) => svg(`<rect x="1.5" y="1.5" width="29" height="29" rx="2" fill="none" stroke="${vc ? rgba([vc[0], vc[1], vc[2], 1]) : '#fff'}" stroke-width="2.5"/>`);
+  const roundButton = (sign) => svg(`<circle cx="16" cy="16" r="11" fill="#2a2420" stroke="#c9a14a" stroke-width="2"/><path d="M10 16h12${sign === '+' ? 'M16 10v12' : ''}" stroke="#ffd100" stroke-width="3" stroke-linecap="round"/>`);
   // Lookalikes for the few stock textures the addon names (no Blizzard art files).
   const STOCK = {
+    'interface\\lfgframe\\ui-lfg-icon-roles': ROLES_SVG,
+    'interface\\buttons\\ui-plusbutton-up': roundButton('+'),
+    'interface\\buttons\\ui-minusbutton-up': roundButton('-'),
+    'interface\\buttons\\buttonhilight-square': svg('<rect x="1" y="1" width="30" height="30" rx="2" fill="#7c8fe0" fill-opacity=".28" stroke="#cdd6ff" stroke-opacity=".6" stroke-width="2"/>'),
+    'interface\\buttons\\checkbuttonhilight': svg('<defs><radialGradient id="c"><stop offset=".55" stop-color="#ffd100" stop-opacity="0"/><stop offset="1" stop-color="#ffe680" stop-opacity=".95"/></radialGradient></defs><rect width="32" height="32" rx="3" fill="url(#c)" stroke="#ffe680" stroke-width="2.5"/>'),
     'interface\\targetingframe\\ui-raidtargetingicon_1': svg('<path d="M16 2l4.1 9 9.8 1-7.4 6.6 2.2 9.6L16 23.2 7.3 28.2l2.2-9.6L2.1 12l9.8-1z" fill="#ffd51a" stroke="#6b4a00" stroke-width="1.6" stroke-linejoin="round"/>'),
     'interface\\dialogframe\\ui-dialog-icon-alertnew': svg('<path d="M16 3L30 28H2z" fill="#f2b705" stroke="#3a2600" stroke-width="2" stroke-linejoin="round"/><rect x="14.4" y="11" width="3.2" height="9" rx="1.2" fill="#1a1000"/><circle cx="16" cy="23.6" r="1.9" fill="#1a1000"/>'),
     'interface\\friendsframe\\informationicon': svg('<circle cx="16" cy="16" r="13" fill="#1d2f52" stroke="#d8b23a" stroke-width="2.5"/><circle cx="16" cy="10" r="2.2" fill="#fff"/><rect x="14" y="14" width="4" height="10" rx="1.4" fill="#fff"/>'),
@@ -52,17 +69,18 @@
   const norm = (p) => String(p).toLowerCase().replace(/\//g, '\\');
 
   // A texture path (or file id) as an image URL, or null when the preview has no lookalike for it.
-  function textureUrl(tex, tc) {
-    if (typeof tex === 'number') return ICONS + 'medium/' + (FILE_IDS[tex] || 'inv_misc_questionmark') + '.jpg';
+  function textureUrl(tex, tc, vc) {
+    if (typeof tex === 'number') return iconUrl(FILE_IDS[tex] || 'inv_misc_questionmark');
     const p = norm(tex);
+    if (p === 'interface\\common\\whiteiconframe') return iconFrame(vc);
     if (STOCK[p]) return STOCK[p];
     const media = p.match(/^interface\\addons\\fantasyforce\\media\\([^.]+)/);
     if (media && tgaUrls[media[1]]) return tgaUrls[media[1]];
     const icon = p.match(/^interface\\icons\\(.+?)(\.blp)?$/);
-    if (icon) return ICONS + 'medium/' + icon[1] + '.jpg';
+    if (icon) return iconUrl(icon[1]);
     if (p === 'interface\\targetingframe\\ui-classes-circles' && tc) {
       const cls = CLASS_BY_COORD[tc.slice(0, 4).map((v) => (+v).toFixed(3)).join(',')];
-      if (cls) return ICONS + 'medium/classicon_' + cls.toLowerCase() + '.jpg';
+      if (cls) return iconUrl('classicon_' + cls.toLowerCase());
     }
     if (!missing.has(p)) { missing.add(p); console.info('addon preview: no lookalike for texture', tex); }
     return null;
@@ -284,7 +302,7 @@
       const cls = ['frame', 'k-' + n.k];
       if (n.tp) n.tp.split(/[,\s]+/).forEach((t) => cls.push('tpl-' + cssClass(t)));
       if (n.nm === 'Minimap') cls.push('minimap');
-      if (n.bd) cls.push(/sliderbar/i.test(n.bd) ? 'bd-slider' : 'bd-dialog');
+      if (n.bd) cls.push(/sliderbar/i.test(n.bd) ? 'bd-slider' : /tooltip/i.test(n.bd) ? 'bd-tooltip' : 'bd-dialog');
       for (const f of ['chk', 'sel', 'lock', 'dis']) if (n[f]) cls.push(f);
       if (n.m || n.wh) cls.push('mouse');
       el.className = cls.join(' ');
@@ -312,7 +330,7 @@
       const html = markup(n.text, f[0]);
       if (e.html !== html) { el.innerHTML = `<span>${html}</span>`; e.html = html; }
     } else {
-      const url = n.tex != null ? textureUrl(n.tex, n.tc) : null;
+      const url = n.tex != null ? textureUrl(n.tex, n.tc, n.vc) : null;
       st.backgroundColor = n.col ? rgba(n.col) : '';
       if (url) {
         st.backgroundImage = `url("${url}")`;
@@ -505,7 +523,11 @@
     chatLabel.style.color = n[1];
     chatInput.style.color = n[1];
   }
-  function openChat(text) { chatInput.value = text; chatInput.focus(); }
+  // an item link in prefilled text shows as [Name], and goes back to the link when sent
+  function openChat(text) {
+    chatInput.value = String(text).replace(/\|c[0-9a-fA-F]{8}\|H[^|]*\|h(\[[^\]]*\])\|h\|r/g, (link, name) => { links.set(name, link); return name; });
+    chatInput.focus();
+  }
   function insertLink(link) {
     const name = (link.match(/\|h(\[[^\]]*\])\|h/) || [])[1] || link;
     links.set(name, link);
@@ -625,12 +647,8 @@
     try {
       for (const [name, b64] of Object.entries(D.tga)) tgaUrls[name.toLowerCase()] = decodeTga(b64);
     } catch (e) { showError('Reading the addon\'s TGA: ' + e.message); }
-    if (D.font) {
-      try {
-        const face = new FontFace('Marcellus', `url(data:font/woff2;base64,${D.font})`);
-        document.fonts.add(await face.load());
-      } catch (e) { console.warn('font', e); }
-    }
+    // the stand-in font is an @font-face rule in preview.css; text is measured once it has loaded
+    try { await document.fonts.load('12px "Marcellus"'); } catch (e) { console.warn('font', e); }
     const { s, tab } = readHash();
     boot(s, '', '', tab);
   })();
