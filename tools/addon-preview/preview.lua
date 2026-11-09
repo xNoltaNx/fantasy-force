@@ -135,7 +135,8 @@ function P.start(race, officer, blocked, data, savedDB, savedChar, openTab, scre
   if not db and data == "full" then db = { characters = copy(world.own), raids = copy(world.raids), personal = copy(world.personal) } end
   local roster = world.roster
   client = FakeGame.newClient({
-    name = world.player.name, class = world.player.class, className = "Hunter", race = RACES[race] or RACES.Orc,
+    -- like WoW Forever: the guild sees "Kettle Brewgut", the character's own name functions say "Kettle"
+    name = world.player.name, firstNameOnly = true, class = world.player.class, className = "Hunter", race = RACES[race] or RACES.Orc,
     level = world.player.level, faction = "Horde", guild = world.guild,
     rankIndex = officer and 1 or 2, rankName = officer and "Officer" or "Raider",
     db = db, charDB = charDB, sources = SOURCES,

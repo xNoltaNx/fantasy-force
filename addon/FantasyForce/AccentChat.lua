@@ -198,6 +198,11 @@ function line.switch()
   if kind == "WHISPER" then
     local name, after_ = rest:match("^(%S+)%s(.*)$")
     if not name then return end
+    -- a guild member's first name alone is their full name ("Azujin Rimetusk" on Forever, where names have two)
+    if type(ns.fullName) == "function" then
+      local ok, full = pcall(ns.fullName, name)
+      if ok and type(full) == "string" and full ~= "" then name = full end
+    end
     line.target, rest = name, after_
   end
   line.chatType = kind
@@ -283,13 +288,22 @@ function FantasyForce_OpenAccentLine()
   pcall(line.open)
 end
 
--- "Enter opens it": while an accent is on (and the setting is), every key bound to the game's Open Chat (usually
--- Enter) opens the accent line instead, through override bindings on a frame of ours: the sanctioned way, never
--- saved, gone the moment we clear them. "/" (Open Chat with a slash) and Reply stay the game's. Bindings can't
--- change in combat: a change then waits for the end of combat.
+-- Shift+Enter (on by default): while an accent is on, Shift+Enter opens the accent line, through an override
+-- binding on a frame of ours: the sanctioned way, never saved, gone the moment we clear it. Enter, "/" and Reply
+-- stay the game's chat box. A Shift+Enter the player bound to something themselves is left alone (the accent
+-- line's own entry in Key Bindings still works). Bindings can't change in combat: a change then waits for the
+-- end of combat.
+line.SHIFT_ENTER = "SHIFT-ENTER"
 function line.enterWanted()
   local c = charDB()
   return hooks.mode == "line" and not hooks.blocked and c.enterOpens ~= false and current() ~= "off"
+end
+
+-- What the player bound Shift+Enter to themselves (nil: nothing, or the accent line already).
+function line.shiftTaken()
+  local action = try(GetBindingAction, line.SHIFT_ENTER, false)
+  if type(action) ~= "string" or action == "" or action == "FANTASYFORCE_ACCENTLINE" then return nil end
+  return action
 end
 
 function line.bindEnter()
@@ -301,11 +315,7 @@ function line.bindEnter()
   hooks.bindPending = false
   line.binder = line.binder or CreateFrame("Frame")
   local keys = {}
-  if line.enterWanted() then
-    for _, k in ipairs({ try(GetBindingKey, "OPENCHAT", false) }) do
-      if type(k) == "string" and k ~= "" then keys[#keys + 1] = k end
-    end
-  end
+  if line.enterWanted() and not line.shiftTaken() then keys[1] = line.SHIFT_ENTER end
   local sig = table.concat(keys, " ")
   if sig == hooks.bound then return end -- nothing to change (our own changes fire UPDATE_BINDINGS too)
   hooks.bound = sig
@@ -362,7 +372,7 @@ local function withHint(s)
   if c.accent == "off" or c.lineHinted or not canConvert() then return s end
   c.lineHinted = true
   if c.enterOpens ~= false then
-    return s .. " Press Enter to talk in it (or the speech bubble by your chat tab); / and Reply still open the game's chat box."
+    return s .. " Press Shift+Enter to talk in it (or the speech bubble by your chat tab); Enter is still the game's chat box."
   end
   return s .. " Talk in it with the speech bubble by your chat tab (or /troll <message>); the game's chat box stays as typed."
 end
@@ -421,7 +431,8 @@ local function debugText()
   return "accent debug: game chat box hooks: none (by design). Accent line: " .. (line.frame and "ready" or "none")
     .. ", bubble: " .. (line.bubble and (line.bubble:IsShown() and "shown" or "hidden") or "none")
     .. ". Blocked: " .. line.blockedList() .. "."
-    .. " Enter: " .. (hooks.bound and hooks.bound ~= "" and ("opens the line (" .. hooks.bound .. ")") or "the game's") .. "."
+    .. " Shift+Enter: " .. (hooks.bound and hooks.bound ~= "" and "opens the line"
+      or line.shiftTaken() and ("the game's (you bound it to " .. line.shiftTaken() .. ")") or "the game's") .. "."
     .. (line.frame and " Send a line from the bubble: the next line says how it went." or "")
 end
 
@@ -457,12 +468,12 @@ local function setChatType(kind, on)
   return statusText()
 end
 
--- "Enter opens it" (on by default): while an accent is on, Enter opens the accent line.
+-- Shift+Enter (on by default): while an accent is on, Shift+Enter opens the accent line (saved as enterOpens).
 local function setEnterOpens(on)
   if on then charDB().enterOpens = nil else charDB().enterOpens = false end
   changed()
-  return on and "Enter opens the accent line while an accent is on (/ and Reply still open the game's chat box)."
-    or "Enter opens the game's chat box; the accent line is on the bubble and its key."
+  return on and "Shift+Enter opens the accent line while an accent is on (Enter stays the game's chat)."
+    or "Shift+Enter is the game's again; the accent line is on the bubble and its key."
 end
 
 -- /accent with nothing after it: off remembers the accent and strength, on brings them back (the
@@ -496,7 +507,7 @@ if type(SlashCmdList) == "table" then
       elseif msg == "debug" then
         print_(debugText())
       elseif msg == "help" then
-        if type(ns.printHelp) == "function" then ns.printHelp("/accent", "/troll") end
+        if type(ns.printHelp) == "function" then ns.printHelp("/accent", "/troll", "Shift+Enter") end
       else
         local kind, onoff = msg:match("^chat%s+(%a+)%s+(%a+)$")
         if kind and (onoff == "on" or onoff == "off") then
@@ -637,7 +648,7 @@ if frame then
       elseif event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN" or event == "MACRO_ACTION_BLOCKED" then
         line.onBlocked(event, arg1, arg2)
       elseif event == "UPDATE_BINDINGS" then
-        if hooks.mode then line.bindEnter() end -- Open Chat rebound: the override follows
+        if hooks.mode then line.bindEnter() end -- the player bound Shift+Enter (or freed it): the override follows
       elseif event == "PLAYER_REGEN_ENABLED" then
         if hooks.bindPending then line.bindEnter() end
       end
@@ -649,6 +660,7 @@ end
 ns.AccentChat = { installHooks = installHooks, hooks = hooks, current = current, convertOutgoing = convertOutgoing,
   charDB = charDB, setAccent = setAccent, setStrength = setStrength, setChatType = setChatType, toggle = toggle,
   setEnterOpens = setEnterOpens, enterOpens = function() return charDB().enterOpens ~= false end,
+  shiftTaken = function() return line.shiftTaken() end,
   statusText = statusText, shortStatus = shortStatus, canConvert = canConvert, preview = preview, SAMPLE = SAMPLE,
   line = line, openLine = line.open, insertLink = line.insertLink, debugText = debugText,
   -- what the line holds, as typed in chat: "/w Grukka Hi!" for a whisper, else the text

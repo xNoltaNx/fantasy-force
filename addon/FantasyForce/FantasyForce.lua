@@ -216,10 +216,226 @@ end
 
 -- ------------------------------------------------------------- characters --
 
+-- This character's name as the guild knows it. WoW Forever's characters have a first and a last name: the guild
+-- roster, chat and whispers use both ("Azujin Rimetusk"), while UnitName("player") may give the first alone.
+-- Everything the addon records or sends about this character uses the full name: from the first of the game's
+-- name functions that gives one, else from the guild roster (the online member whose first word is ours, of our
+-- class and level, if exactly one). Kept per character once known; until then sharing waits (pump below).
+-- Names are compared with the realm stripped, never the last name.
+local names = { full = nil, triedAt = -1e9 }
+
+local function shortName()
+  return stripRealm(try(UnitName, "player"))
+end
+
+-- "First Last" from a name function's answer, when it is our full name (its first word ours).
+function names.take(v, short)
+  if type(v) ~= "string" then return nil end
+  v = stripRealm(v):match("^%s*(.-)%s*$")
+  if v == "" or not v:find(" ", 1, true) then return nil end
+  if short ~= "" and v:sub(1, #short + 1) ~= short .. " " then
+    -- a title around it (UnitPVPName): the name within
+    local i = v:find(short .. " ", 1, true)
+    if not i then return nil end
+    v = v:sub(i)
+  end
+  return v:match("^(%S+ [^%s,]+)")
+end
+
+-- From the guild roster: the member who is us. Our exact name (a game without last names) decides alone; a
+-- first-word match must be online, of our class and level, and the only one.
+function names.fromRoster(short)
+  local n = num(try(GetNumGuildMembers), 0)
+  if n == 0 then return nil end
+  local _, myClass = try(UnitClass, "player")
+  local myLevel = num(try(UnitLevel, "player"), 0)
+  local exact, found, count = false, nil, 0
+  for i = 1, n do
+    local name, _, _, level, _, _, _, _, online, _, class = try(GetGuildRosterInfo, i)
+    name = stripRealm(name)
+    if name == short then
+      exact = true
+    elseif name:sub(1, #short + 1) == short .. " " and online and class == myClass and num(level, 0) == myLevel and name ~= found then
+      found, count = name, count + 1
+    end
+  end
+  if exact then return short end
+  if count == 1 then return found end
+  return nil
+end
+
+-- Tries the game's name functions, then the roster (at most every 5 seconds unless forced). Nil until known.
+function names.resolve(force)
+  if names.full then return names.full end
+  local short = shortName()
+  if short == "" or short == "Unknown" then return nil end
+  if type(FantasyForceCharDB) ~= "table" then FantasyForceCharDB = {} end -- per character (the accent's settings too)
+  local cdb = FantasyForceCharDB
+  local cached = type(cdb.fullName) == "string" and cdb.fullName or nil
+  local full
+  if cached and (cached == short or cached:sub(1, #short + 1) == short .. " ") then
+    full = cached
+  elseif short:find(" ", 1, true) then
+    full = short
+  else
+    local now = time()
+    if not force and now - names.triedAt < 5 then return nil end
+    names.triedAt = now
+    full = names.take((try(UnitFullName, "player")), short) or names.take(try(GetUnitName, "player", true), short)
+      or names.take(try(UnitNameUnmodified, "player"), short)
+    if not full and type(C_PlayerInfo) == "table" then
+      local loc = type(PlayerLocation) == "table" and try(PlayerLocation.CreateFromUnit, PlayerLocation, "player") or nil
+      for k, fn in pairs(C_PlayerInfo) do
+        if not full and type(k) == "string" and k:find("Name", 1, true) and k:sub(1, 3) ~= "Set" and type(fn) == "function" then
+          full = names.take(try(fn), short) or names.take(try(fn, "player"), short) or (loc and names.take(try(fn, loc), short))
+        end
+      end
+    end
+    full = full or names.take(try(UnitPVPName, "player"), short) or names.fromRoster(short)
+  end
+  if not full then return nil end
+  names.full = full
+  cdb.fullName = full
+  if full ~= short then
+    pcall(names.migrate, { [short] = full })
+    if names.onKnown then pcall(names.onKnown) end
+  end
+  return full
+end
+
+function names.known() return names.resolve() ~= nil end
+
 local function readName()
-  local name = try(UnitFullName, "player")
-  if type(name) ~= "string" or name == "" then name = try(UnitName, "player") end
-  return stripRealm(name)
+  return names.resolve() or shortName()
+end
+
+-- Records kept under a first name alone moved to the full name (map = { [first] = full }): this account's
+-- characters and their mains, bank alts, banks and sync records, guildmates' shared crafting and accounts,
+-- craft requests (their ids carry the asker), raids. Two records for one character are merged (the newer wins,
+-- the older fills what it lacks): nothing is lost.
+function names.migrate(map)
+  if type(map) ~= "table" or not next(map) then return end
+  local db = initDB()
+  local function to(n) return type(n) == "string" and map[n] or n end
+  local function merge(a, b)
+    if type(a) ~= "table" or type(b) ~= "table" then return a == nil and b or a end
+    local base, other = a, b
+    if num(b.updated, 0) > num(a.updated, 0) then base, other = b, a end
+    for k, v in pairs(other) do if base[k] == nil then base[k] = v end end
+    return base
+  end
+  local function rekey(t)
+    if type(t) ~= "table" then return end
+    for old, new in pairs(map) do
+      if t[old] ~= nil and old ~= new then
+        t[new] = merge(t[new], t[old])
+        t[old] = nil
+      end
+    end
+  end
+  local function list(t)
+    if type(t) ~= "table" then return end
+    for i, v in ipairs(t) do t[i] = to(v) end
+  end
+  rekey(db.characters)
+  for name, rec in pairs(db.characters) do
+    if type(rec) == "table" and rec.name ~= nil then rec.name = name end
+  end
+  rekey(db.bankAlts)
+  rekey(db.personal)
+  rekey(db.mainOf)
+  for k, v in pairs(type(db.mainOf) == "table" and db.mainOf or {}) do db.mainOf[k] = to(v) end
+  for g, v in pairs(type(db.mains) == "table" and db.mains or {}) do db.mains[g] = to(v) end
+  rekey(db.shared.crafters)
+  for _, c in pairs(db.shared.crafters) do
+    if type(c) == "table" then c.by, c.from = to(c.by), to(c.from) end
+  end
+  for _, a in pairs(db.shared.accounts) do
+    if type(a) == "table" then
+      a.main, a.from = to(a.main), to(a.from)
+      for _, c in ipairs(type(a.chars) == "table" and a.chars or {}) do
+        if type(c) == "table" then c.name = to(c.name) end
+      end
+    end
+  end
+  for _, b in ipairs({ db.bank, db.bankBefore }) do
+    if type(b) == "table" then b.by, b.sender = to(b.by), to(b.sender) end
+  end
+  if type(db.guild) == "table" then db.guild.by = to(db.guild.by) end
+  for _, r in ipairs(type(db.raids) == "table" and db.raids or {}) do
+    if type(r) == "table" then
+      r.by = to(r.by)
+      list(r.attendees)
+      for _, b in ipairs(type(r.bosses) == "table" and r.bosses or {}) do if type(b) == "table" then list(b.attendees) end end
+      for _, l in ipairs(type(r.loot) == "table" and r.loot or {}) do if type(l) == "table" then l.to = to(l.to) end end
+    end
+  end
+  -- requests: the id carries the asker
+  local st = type(db.sync) == "table" and db.sync or {}
+  rekey(st.own)
+  local moved = {}
+  for id, r in pairs(db.requests) do
+    if type(r) == "table" then
+      r.claimer, r.from = to(r.claimer), to(r.from)
+      local asker = to(r.asker)
+      if asker ~= r.asker and Sync and r.key then
+        r.asker = asker
+        moved[id] = Sync.craftRequestId(asker, r.key)
+      end
+    end
+  end
+  for old, new in pairs(moved) do
+    db.requests[new] = merge(db.requests[new], db.requests[old])
+    db.requests[old] = nil
+    for _, k in ipairs({ "requestsTold", "claimsTold" }) do
+      if type(st[k]) == "table" and st[k][old] ~= nil then st[k][new], st[k][old] = st[k][new] or st[k][old], nil end
+    end
+  end
+  if type(st.claimsTold) == "table" then
+    for id, tag in pairs(st.claimsTold) do
+      tag = str(tag)
+      local done = tag:sub(1, 5) == "done:" and "done:" or ""
+      local who, at = tag:sub(#done + 1):match("^(.-)@(%d+)$")
+      if who and map[who] then st.claimsTold[id] = done .. map[who] .. "@" .. at end
+    end
+  end
+  if type(db.windows) == "table" and type(db.windows.bankSource) == "string" then
+    local who = db.windows.bankSource:match("^@char:(.+)$")
+    if who and map[who] then db.windows.bankSource = "@char:" .. map[who] end
+  end
+  if names.afterMigrate then pcall(names.afterMigrate) end
+end
+
+-- Guildmates' records kept under a first name alone (shared by an addon from before full names, or recorded
+-- before ours was known) move to the roster's full name, when exactly one member has that first name.
+function names.firstMap(members)
+  local firsts, map = {}, {}
+  for _, m in ipairs(type(members) == "table" and members or {}) do
+    local full = type(m) == "table" and str(m.name) or ""
+    local first = full:match("^(%S+) ")
+    if first then
+      if firsts[first] == nil then firsts[first] = full elseif firsts[first] ~= full then firsts[first] = false end
+    end
+  end
+  for first, full in pairs(firsts) do if full then map[first] = full end end
+  return map
+end
+
+function names.migrateGuild(members)
+  local map = names.firstMap(members)
+  if next(map) then pcall(names.migrate, map) end
+  names.byFirst = map
+end
+
+-- A guild member's full name from what was typed ("Azujin" for "Azujin Rimetusk", when only one member is
+-- called that), else the name as typed.
+function names.fullOf(name)
+  name = stripRealm(name)
+  if names.byFirst == nil then
+    local g = initDB().guild
+    names.byFirst = names.firstMap(type(g) == "table" and g.members or nil)
+  end
+  return names.byFirst[name] or name
 end
 
 local function recordCharacter()
@@ -326,6 +542,8 @@ local function recordGuild()
     if #members == 0 then return end
 
     lastGuildRecord = now
+    names.resolve(true)
+    pcall(names.migrateGuild, members)
     db.guild = {
       name = str((try(GetGuildInfo, "player"))),
       updated = now,
@@ -987,6 +1205,11 @@ pump = function()
     share.queue = {}
     return
   end
+  if not names.known() then -- our full name isn't known yet: hold everything (names.onKnown starts again)
+    share.pumping = true
+    after(5, pump)
+    return
+  end
   local now = clock()
   share.tokens = math.min(SEND_BURST, share.tokens + (now - share.tokensAt) / SEND_REFILL)
   share.tokensAt = now
@@ -1236,6 +1459,22 @@ local function shareOwn()
   end
 end
 
+-- Our full name became known after something was recorded or queued under the first name alone: the records
+-- have moved (names.migrate); what was queued carrying the old name goes, and ours is shared again.
+names.onKnown = function()
+  local keep = {}
+  for _, j in ipairs(share.queue) do
+    if j.kind == "R" and not j.msgs then keep[#keep + 1] = j end
+  end
+  share.queue = keep
+  alts.index = nil
+  after(1, function() pcall(shareOwn) end)
+end
+names.afterMigrate = function()
+  alts.index = nil
+  if refreshWindows then pcall(refreshWindows) end
+end
+
 local function answerRequest(req, asker)
   if not canShare() then return end
   local db = initDB()
@@ -1453,6 +1692,8 @@ local function unitTooltip(tt)
     local _, unit = tt:GetUnit()
     if not unit or not try(UnitIsPlayer, unit) then return end
     local name = stripRealm(str((try(UnitName, unit))))
+    if try(UnitIsUnit, unit, "player") then name = readName() end
+    if name ~= "" and not mainIndex()[name] then name = names.fullOf(name) end -- Forever: maybe the first name alone
     local e = name ~= "" and mainIndex()[name]
     if not e then return end
     if e.main ~= name then
@@ -4176,6 +4417,7 @@ local COMMANDS = {
   { "/accent help", "Accent commands in chat" },
   { "/troll", "Troll on or off" },
   { "/troll <message>", "Say one thing in troll" },
+  { "Shift+Enter", "Talk in your accent (while one is on)" },
 }
 ui.COMMANDS = COMMANDS
 
@@ -4550,10 +4792,15 @@ function panel.makeOptions(page)
     { "thick", "Thick", "More words, and now and then a closing line." } },
     function(v) local A = accentApi() if A then A.setStrength(v) end end)
   o.moreAccent = ui.more(page, 140, -227, function(open) panel.refreshOptions() end)
-  o.enterOpens = ui.check(page, 206, -224, "Enter opens it", function(on)
+  o.enterOpens = ui.check(page, 206, -224, "Shift+Enter", function(on)
     local A = accentApi()
     if A and A.setEnterOpens then A.setEnterOpens(on) end
-  end, "While an accent is on, Enter opens the accent line. The game's chat box is still on / and Reply.")
+  end, function()
+    local A = accentApi()
+    local taken = A and A.shiftTaken and A.shiftTaken()
+    return "While an accent is on, Shift+Enter opens the accent line. Enter stays the game's chat."
+      .. (taken and ("\nYou bound Shift+Enter to " .. taken .. " in Key Bindings, so it stays that; the accent line's own key binding still works.") or "")
+  end)
   o.preview = line(16, -254, 700, "GameFontDisableSmall")
   o.chats = {}
   for i, c in ipairs(CHAT_LABELS) do
@@ -4617,7 +4864,7 @@ function panel.refreshOptions()
       showIf(cb, moreAccent)
     end
     if c.accent ~= "off" then
-      status = A.canConvert() and ((A.enterOpens and A.enterOpens()) and "Talk in it: press Enter (or the bubble by your chat tab). / and Reply open the game's chat box, as typed."
+      status = A.canConvert() and ((A.enterOpens and A.enterOpens()) and "Talk in it: press Shift+Enter (or the bubble by your chat tab). Enter opens the game's chat box, as typed."
         or "Talk in it: the bubble by your chat tab, or /troll <message>. The game's chat box stays as typed.")
         or "Chat can't be changed here: use /troll <message>."
     end
@@ -4778,7 +5025,7 @@ function panel.make()
     c.list:SetWidth(panel.W - 40)
     c.list:SetJustifyH("LEFT")
     try(c.list.SetSpacing, c.list, 3)
-    c.list:SetText(table.concat(ui.commandLines("/ff", "/accent", "/troll"), "\n"))
+    c.list:SetText(table.concat(ui.commandLines("/ff", "/accent", "/troll", "Shift+Enter"), "\n"))
     c:Hide()
     panel.commands = c
   end
@@ -5273,6 +5520,7 @@ if frame then
       elseif event == "PLAYER_REGEN_ENABLED" then
         pcall(asks.showToasts) -- the request toasts that waited for the fight to end
       elseif event == "GUILD_ROSTER_UPDATE" then
+        names.resolve(true) -- the roster may say our full name
         if loggedIn then recordGuild() end
         ui.online = nil -- who's online changed: the crafting window marks them
         redrawSoon()
@@ -5343,7 +5591,7 @@ if type(SlashCmdList) == "table" then SlashCmdList["FANTASYFORCE"] = function(ms
     elseif msg == "status" then
       ui.printSummary()
     elseif msg == "help" then
-      ui.printHelp("/ff", "/accent", "/troll")
+      ui.printHelp("/ff", "/accent", "/troll", "Shift+Enter")
     elseif msg == "reset" then
       FantasyForceDB = nil
       initDB()
@@ -5374,6 +5622,7 @@ end end
 if type(ns) == "table" then
   ns.try, ns.str, ns.print, ns.after = try, str, print_, after
   ns.printHelp, ns.onSettingChanged = ui.printHelp, ui.changed
-  ns.ff = { ui = ui, panel = panel, cmd = cmd, asks = asks,
+  ns.fullName = names.fullOf -- a member's full name from a first name typed alone (the accent line's /w)
+  ns.ff = { ui = ui, panel = panel, cmd = cmd, asks = asks, names = names,
     views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView, Site = siteView } }
 end

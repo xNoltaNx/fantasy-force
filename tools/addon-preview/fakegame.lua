@@ -636,6 +636,13 @@ function FakeGame.newClient(o)
   client.bindings = { OPENCHAT = { "ENTER" }, OPENCHATSLASH = { "/" }, REPLY = { "R" } }
   client.overrides = {}
   env.GetBindingKey = function(command) return table.unpack(client.bindings[command] or {}) end
+  -- the player's own binding on a key (overrides aside), "" for none, as the game's GetBindingAction(key, false)
+  env.GetBindingAction = function(key)
+    for command, keys in pairs(client.bindings) do
+      for _, k in ipairs(keys) do if k == key then return command end end
+    end
+    return ""
+  end
   env.SetOverrideBinding = function(owner, _, key, command)
     if client.combat and fromAddon(2) then
       client.fire("ADDON_ACTION_BLOCKED", "FantasyForce", "SetOverrideBinding()")
@@ -716,9 +723,12 @@ function FakeGame.newClient(o)
 
   -- the player, the guild
   local race = o.race or { "Human", "Human" }
-  env.UnitName = function(unit) if unit == nil or unit == "player" then return name end return client.hoverName end
+  -- firstNameOnly: like WoW Forever, the character's own name functions give the first name alone, while the
+  -- guild roster, chat and whispers use "First Last"
+  local ownName = o.firstNameOnly and (name:match("^(%S+)") or name) or name
+  env.UnitName = function(unit) if unit == nil or unit == "player" then return ownName end return client.hoverName end
   env.UnitIsPlayer = function() return true end
-  env.UnitFullName = function() return name, "Realm" end
+  env.UnitFullName = function() return ownName, "Realm" end
   env.UnitLevel = function() return o.level or 60 end
   env.UnitClass = function() return o.className or o.class, o.class end
   env.UnitRace = function() return race[1], race[2] end
