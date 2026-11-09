@@ -91,6 +91,8 @@ Accent settings are in a second, per-character file, `WTF\Account\<ACCOUNT>\<Rea
 
 Put the `FantasyForce` folder in `World of Warcraft\_forever_\Interface\AddOns\`, or install from CurseForge.
 
+To try the window without the game, `npm run addon-preview` (in the repo) builds `tools/addon-preview/dist/index.html`: these Lua files running in a browser against a pretend game and guild.
+
 ## Commands
 
 `/ff help` prints this list in game; the window's "i" icon shows the same list.

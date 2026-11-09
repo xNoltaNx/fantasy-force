@@ -1,0 +1,142 @@
+/* The addon preview: a 1440x900 page, a control bar above a 1440x870 pretend game screen. The game's stock
+   pieces (BasicFrameTemplate, red buttons, check and radio buttons, tabs, inputs, the tooltip) drawn in CSS,
+   close to the real ones without Blizzard's art files. */
+html, body { margin: 0; background: #050505; overflow: hidden; }
+#page { width: 1440px; height: 900px; transform-origin: 0 0; position: relative; }
+
+/* ------------------------------------------------------------- the bar -- */
+#bar { height: 30px; box-sizing: border-box; display: flex; align-items: center; gap: 14px; padding: 0 12px;
+  background: #18181b; border-bottom: 1px solid #333; color: #c8c8cc; font: 12px system-ui, sans-serif; white-space: nowrap; }
+#bar b { color: #fff; font-weight: 600; }
+#bar label { display: flex; align-items: center; gap: 4px; }
+#bar input[type=checkbox] { margin: 0; }
+#bar select, #bar button, #slash { font: inherit; background: #26262b; color: #e6e6e6; border: 1px solid #44444c; border-radius: 4px; height: 20px; }
+#bar button { padding: 0 10px; cursor: pointer; }
+#slash { width: 200px; padding: 0 6px; }
+#caught { color: #e0a040; }
+#note { margin-left: auto; color: #7a7a82; }
+
+/* ------------------------------------------------------- the game screen -- */
+#game { position: relative; width: 1440px; height: 870px; overflow: hidden; user-select: none; cursor: default; }
+#scene { position: absolute; inset: -40px; filter: blur(18px);
+  background:
+    radial-gradient(ellipse 40% 35% at 28% 62%, rgba(150, 82, 38, .75), transparent 70%),
+    radial-gradient(ellipse 35% 30% at 70% 40%, rgba(70, 92, 58, .7), transparent 70%),
+    radial-gradient(ellipse 50% 25% at 50% 92%, rgba(60, 40, 26, .9), transparent 70%),
+    radial-gradient(ellipse 30% 20% at 82% 78%, rgba(120, 60, 30, .5), transparent 70%),
+    linear-gradient(180deg, #2a2f3c 0%, #463527 45%, #2b1e15 100%); }
+#frames { position: absolute; inset: 0; pointer-events: none; z-index: 2; }
+#frames > div { position: absolute; box-sizing: border-box; pointer-events: none; }
+#frames > .frame.mouse { pointer-events: auto; }
+.hit { position: absolute; pointer-events: auto; }
+.fs { display: flex; overflow: visible; text-shadow: 1px 1px 0 #000, 0 0 2px rgba(0, 0, 0, .6); }
+.fs > span { display: block; }
+.fs .inl, .chatline .inl, #tooltip .inl { vertical-align: -2px; }
+.tex { background-repeat: no-repeat; }
+
+/* the minimap: a round map with the frame's ring */
+.minimap { border-radius: 50%;
+  background: radial-gradient(circle at 42% 38%, #8a7b52 0%, #6b6440 30%, #4e5a34 60%, #37402a 100%);
+  box-shadow: 0 0 0 3px #1a140b, 0 0 0 6px #8d7a4e, 0 0 0 8px #241b0e, 0 3px 12px rgba(0, 0, 0, .7); }
+.minimap::after { content: ''; position: absolute; left: 50%; top: 50%; width: 8px; height: 8px; margin: -4px; background: #fff;
+  clip-path: polygon(50% 0, 100% 100%, 50% 75%, 0 100%); }
+
+/* BasicFrameTemplateWithInset: dark panel, gold-grey metal border, title bar */
+.tpl-BasicFrameTemplateWithInset { border-radius: 4px;
+  background:
+    radial-gradient(ellipse at 30% 20%, rgba(255, 255, 255, .035), transparent 60%),
+    radial-gradient(ellipse at 80% 90%, rgba(255, 255, 255, .025), transparent 55%),
+    linear-gradient(160deg, #1c1a18, #0f0e0d 60%, #151311);
+  border: 2px solid #8a8274;
+  box-shadow: inset 0 0 0 1px #2a2723, inset 0 0 0 3px #4f4a42, 0 0 0 1px #000, 0 6px 22px rgba(0, 0, 0, .75); }
+.tpl-BasicFrameTemplateWithInset::before { content: ''; position: absolute; left: 3px; right: 3px; top: 3px; height: 18px;
+  background: linear-gradient(#34302b, #1b1916); border-bottom: 1px solid #6e675b; border-radius: 2px 2px 0 0; }
+.tpl-Inset { border: 1px solid #3c3833; border-radius: 3px; background: rgba(0, 0, 0, .32);
+  box-shadow: inset 0 1px 4px rgba(0, 0, 0, .85), 0 1px 0 rgba(255, 255, 255, .04); }
+.bd-dialog { border: 3px solid #7b7466; border-radius: 6px; background: rgba(8, 8, 8, .92); }
+
+/* the red close X */
+.tpl-UIPanelCloseButton::before { content: ''; position: absolute; left: 3px; top: 3px; right: 3px; bottom: 3px; border-radius: 3px;
+  background: linear-gradient(#b3200f, #6d0b03); border: 1px solid #d9b45a; box-shadow: inset 0 0 0 1px #3a0500, 0 0 0 1px #000; }
+.tpl-UIPanelCloseButton::after { content: ''; position: absolute; inset: 0;
+  background: no-repeat center/12px url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Cpath d='M2 2l8 8M10 2l-8 8' stroke='%23ffe8a8' stroke-width='2.2' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.tpl-UIPanelCloseButton:hover::before { filter: brightness(1.3); }
+.tpl-UIPanelCloseButton.down::before { filter: brightness(.8); }
+
+/* UIPanelButtonTemplate: red with a gold edge; brighter under the mouse (or while its highlight is locked) */
+.tpl-UIPanelButtonTemplate { border-radius: 3px; border: 1px solid #000;
+  background: linear-gradient(#a01a0c 0%, #7a0e05 45%, #560801 100%);
+  box-shadow: inset 0 0 0 1px rgba(232, 190, 90, .75), inset 0 1px 0 1px rgba(255, 210, 120, .35); }
+.tpl-UIPanelButtonTemplate:hover {
+  box-shadow: inset 0 0 0 1px rgba(255, 220, 120, .95), inset 0 0 8px rgba(255, 190, 90, .55); filter: brightness(1.12); }
+/* LockHighlight: the button's highlight stays lit (a picked filter, an open More) */
+.tpl-UIPanelButtonTemplate.lock {
+  box-shadow: inset 0 0 0 1px rgba(255, 230, 140, 1), inset 0 0 10px 2px rgba(255, 200, 100, .75); filter: brightness(1.3); }
+.tpl-UIPanelButtonTemplate.down { background: linear-gradient(#5c0901, #7a0e05 60%, #8a1408); box-shadow: inset 0 0 0 1px rgba(200, 160, 70, .7), inset 0 2px 4px rgba(0, 0, 0, .6); }
+.tpl-UIPanelButtonTemplate.dis { background: linear-gradient(#4a4a4a, #2a2a2a); filter: none; }
+
+/* UICheckButtonTemplate: a dark box with a gold check */
+.tpl-UICheckButtonTemplate::before { content: ''; position: absolute; left: 4px; top: 4px; right: 4px; bottom: 4px; border-radius: 2px;
+  background: linear-gradient(#0b0b0b, #1d1c1a); border: 1px solid #8b8170; box-shadow: inset 0 1px 3px #000; }
+.tpl-UICheckButtonTemplate:hover::before { border-color: #e0c77a; box-shadow: inset 0 1px 3px #000, 0 0 4px rgba(255, 210, 100, .6); }
+.tpl-UICheckButtonTemplate.chk::after { content: ''; position: absolute; left: 2px; top: -1px; right: -1px; bottom: 2px;
+  background: no-repeat center/contain url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath d='M4 12.5l5 5L21 4.5' fill='none' stroke='%23201400' stroke-width='5' stroke-linecap='round' stroke-linejoin='round'/%3E%3Cpath d='M4 12.5l5 5L21 4.5' fill='none' stroke='%23ffd100' stroke-width='3' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E"); }
+
+/* UIRadioButtonTemplate: a round dark button with a gold dot */
+.tpl-UIRadioButtonTemplate::before { content: ''; position: absolute; inset: 1px; border-radius: 50%;
+  background: radial-gradient(circle at 50% 40%, #2a2824, #0a0a0a); border: 1px solid #8b8170; box-shadow: inset 0 1px 2px #000; }
+.tpl-UIRadioButtonTemplate:hover::before { border-color: #e0c77a; }
+.tpl-UIRadioButtonTemplate.chk::after { content: ''; position: absolute; inset: 4.5px; border-radius: 50%;
+  background: radial-gradient(circle at 40% 35%, #fff3b0, #ffd100 45%, #a07400); }
+
+/* PanelTabButtonTemplate: tabs hanging under the frame; the picked one is lighter and joins the frame */
+.tpl-PanelTabButtonTemplate, .tpl-CharacterFrameTabButtonTemplate { border-radius: 0 0 7px 7px;
+  background: linear-gradient(#0e0d0c, #1d1a17 70%, #24201b); border: 2px solid #6e675b; border-top: none;
+  box-shadow: 0 0 0 1px #000, inset 0 -1px 0 1px #2c2822; }
+.tpl-PanelTabButtonTemplate:hover, .tpl-CharacterFrameTabButtonTemplate:hover { filter: brightness(1.25); }
+.tpl-PanelTabButtonTemplate.sel, .tpl-CharacterFrameTabButtonTemplate.sel { transform: translateY(-3px); height: calc(100% + 3px);
+  background: linear-gradient(#1a1816, #2e2a25 70%, #3a342c); border-color: #8a8274; }
+
+/* InputBoxTemplate and SearchBoxTemplate */
+.tpl-InputBoxTemplate, .tpl-SearchBoxTemplate { border: 1px solid #5c564c; border-radius: 3px; background: rgba(0, 0, 0, .55);
+  box-shadow: inset 0 1px 3px #000; }
+.k-EditBox input { position: absolute; inset: 0; width: 100%; height: 100%; box-sizing: border-box; padding: 0 6px; border: none; outline: none;
+  background: transparent; color: #fff; caret-color: #fff; }
+.k-EditBox input::selection { background: rgba(255, 209, 0, .45); }
+.tpl-SearchBoxTemplate input { padding-left: 20px; }
+.tpl-SearchBoxTemplate::before { content: ''; position: absolute; left: 4px; top: 50%; width: 12px; height: 12px; margin-top: -6px;
+  background: no-repeat center/contain url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 12 12'%3E%3Ccircle cx='5' cy='5' r='3.4' fill='none' stroke='%23a8a8a8' stroke-width='1.6'/%3E%3Cpath d='M7.6 7.6L11 11' stroke='%23a8a8a8' stroke-width='1.8' stroke-linecap='round'/%3E%3C/svg%3E"); }
+.k-EditBox:not(.tpl-InputBoxTemplate):not(.tpl-SearchBoxTemplate) input { padding: 0; }
+
+/* the options slider's track, as a scroll bar */
+.bd-slider { border: 1px solid #5d574c; border-radius: 6px; background: rgba(0, 0, 0, .6); box-shadow: inset 0 1px 3px #000; }
+
+/* GameTooltip: dark, a thin grey border */
+#tooltip { position: absolute; display: none; z-index: 5; pointer-events: none; max-width: 320px; padding: 7px 9px 8px;
+  background: rgba(6, 6, 14, .92); border: 1px solid #b2b2b2; border-radius: 4px; box-shadow: inset 0 0 0 1px #3a3a44, 0 2px 8px rgba(0, 0, 0, .6);
+  font: 12px "Marcellus", Georgia, serif; line-height: 15px; text-shadow: 1px 1px 0 #000; }
+#tooltip .tt-title { font-size: 14px; line-height: 18px; white-space: nowrap; }
+#tooltip .tt-line { white-space: nowrap; }
+#tooltip .tt-line.wrap { white-space: normal; min-width: 200px; }
+
+/* the chat frame */
+#chat { position: absolute; left: 18px; bottom: 34px; width: 440px; z-index: 1; }
+#chatlog { height: 190px; overflow-y: auto; padding: 4px 6px; background: rgba(0, 0, 0, .28); scrollbar-width: none;
+  font: 14px "Arial Narrow", Arial, sans-serif; line-height: 17px; text-shadow: 1px 1px 0 #000; user-select: text; }
+#chatlog { display: flex; flex-direction: column; }
+.chatline { word-wrap: break-word; }
+.chatline:first-child { margin-top: auto; }
+#chatbox { display: flex; align-items: center; height: 26px; margin-top: 4px; padding: 0 6px; gap: 4px;
+  background: rgba(0, 0, 0, .55); border: 1px solid #4f4a42; border-radius: 4px; font: 14px "Arial Narrow", Arial, sans-serif; text-shadow: 1px 1px 0 #000; }
+#chatinput { flex: 1; background: transparent; border: none; outline: none; color: #fff; font: inherit; caret-color: #fff; }
+
+/* the game's script error box */
+#errorbox { position: absolute; display: none; z-index: 10; left: 50%; top: 90px; width: 560px; margin-left: -280px; padding: 10px 12px;
+  background: rgba(14, 6, 6, .96); border: 2px solid #b8231a; border-radius: 6px; box-shadow: 0 0 0 1px #000, 0 8px 28px rgba(0, 0, 0, .8);
+  color: #f2f2f2; font: 12px Consolas, monospace; }
+.err-title { font: 15px "Marcellus", Georgia, serif; color: #ff3b2e; margin-bottom: 6px; }
+.err-count { float: right; color: #c8c8c8; font-size: 12px; }
+#errorbox pre { margin: 0; max-height: 300px; overflow: auto; white-space: pre-wrap; user-select: text; }
+.err-buttons { margin-top: 8px; text-align: right; }
+.err-buttons button { font: 12px "Marcellus", Georgia, serif; color: #ffd100; margin-left: 6px; padding: 2px 12px; cursor: pointer;
+  background: linear-gradient(#a01a0c, #560801); border: 1px solid #000; border-radius: 3px; box-shadow: inset 0 0 0 1px rgba(232, 190, 90, .75); }

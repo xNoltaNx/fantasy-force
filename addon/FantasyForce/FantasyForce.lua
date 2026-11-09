@@ -49,6 +49,22 @@ local function stripRealm(name)
   return base or name
 end
 
+-- The game's own text colours (NORMAL_FONT_COLOR gold, HIGHLIGHT white, GRAY, GREEN), with their usual
+-- values when a client lacks the global. gameColor gives r, g, b; with asCode, a |cff colour code.
+local GAME_COLORS = { NORMAL = { 1, 0.82, 0 }, HIGHLIGHT = { 1, 1, 1 }, GRAY = { 0.5, 0.5, 0.5 }, GREEN = { 0.1, 1, 0.1 } }
+local function gameColor(name, asCode)
+  local c
+  if name == "NORMAL" then c = NORMAL_FONT_COLOR
+  elseif name == "GRAY" then c = GRAY_FONT_COLOR
+  elseif name == "GREEN" then c = GREEN_FONT_COLOR
+  else name, c = "HIGHLIGHT", HIGHLIGHT_FONT_COLOR end
+  local d = GAME_COLORS[name]
+  local r, g, b = d[1], d[2], d[3]
+  if type(c) == "table" and type(c.r) == "number" then r, g, b = c.r, c.g, c.b end
+  if asCode then return string.format("|cff%02x%02x%02x", floor(r * 255), floor(g * 255), floor(b * 255)) end
+  return r, g, b
+end
+
 local function initDB()
   if type(FantasyForceDB) ~= "table" then FantasyForceDB = {} end
   local db = FantasyForceDB
@@ -63,7 +79,7 @@ end
 
 local function print_(msg)
   if DEFAULT_CHAT_FRAME and DEFAULT_CHAT_FRAME.AddMessage then
-    DEFAULT_CHAT_FRAME:AddMessage("|cffffd100FantasyForce:|r " .. msg)
+    DEFAULT_CHAT_FRAME:AddMessage(gameColor("NORMAL", true) .. "FantasyForce:|r " .. msg)
   end
 end
 
@@ -1189,14 +1205,19 @@ local function unitTooltip(tt)
     local e = name ~= "" and mainIndex()[name]
     if not e then return end
     if e.main ~= name then
-      tt:AddLine("Alt of " .. e.main, 0.55, 0.8, 1)
+      local r, g, b = gameColor("NORMAL")
+      tt:AddLine("Alt of " .. e.main, r, g, b)
     elseif #e.alts > 0 then
       local list = {}
       for _, c in ipairs(e.alts) do list[#list + 1] = c.name .. " (" .. num(c.level, 0) .. ")" end
-      tt:AddLine("Alts: " .. table.concat(list, ", "), 0.55, 0.8, 1, true)
+      local r, g, b = gameColor("NORMAL")
+      tt:AddLine("Alts: " .. table.concat(list, ", "), r, g, b, true)
     end
     local profs = profText(e.char)
-    if profs ~= "" then tt:AddLine(profs, 0.8, 0.8, 0.8, true) end
+    if profs ~= "" then
+      local r, g, b = gameColor("HIGHLIGHT")
+      tt:AddLine(profs, r, g, b, true)
+    end
     tt:Show()
   end)
 end
@@ -1329,7 +1350,7 @@ end
 
 local function classHex(class)
   local c = (CUSTOM_CLASS_COLORS and CUSTOM_CLASS_COLORS[class]) or (RAID_CLASS_COLORS and RAID_CLASS_COLORS[class])
-  if type(c) ~= "table" or not c.r then return "|cffffffff" end
+  if type(c) ~= "table" or not c.r then return gameColor("HIGHLIGHT", true) end
   return string.format("|cff%02x%02x%02x", floor(c.r * 255), floor(c.g * 255), floor(c.b * 255))
 end
 
@@ -1402,7 +1423,7 @@ end
 local function filterButton(w, i)
   local b = w.filterButtons[i]
   if b then return b end
-  b = ui.choiceButton(w.frame, 18)
+  b = ui.stockButton(w.frame, 20)
   if not b then return nil end
   b:SetScript("OnClick", function(self)
     w.filter = self.value
@@ -1432,8 +1453,8 @@ function ui.render(w)
     if b then
       b.value = i > 1 and n or nil
       b.text:SetText(n)
-      local bw = num(try(b.text.GetStringWidth, b.text), 40) + 14
-      if x > 0 and x + bw > maxX then x, y = 0, y + 20 end
+      local bw = num(try(b.text.GetStringWidth, b.text), 40) + 20
+      if x > 0 and x + bw > maxX then x, y = 0, y + 22 end
       b:SetWidth(bw)
       b:ClearAllPoints()
       b:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 6 + x, w.filterTop - y)
@@ -1444,7 +1465,7 @@ function ui.render(w)
   end
   for i = #names + 1, #w.filterButtons do w.filterButtons[i]:Hide() end
 
-  local listTop = w.noFilters and (w.filterTop + 2) or (w.filterTop - y - 24)
+  local listTop = w.noFilters and (w.filterTop + 2) or (w.filterTop - y - 26)
   w.list:ClearAllPoints()
   w.list:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 6, listTop)
   w.list:SetPoint("BOTTOMRIGHT", w.frame, "BOTTOMRIGHT", -24, 24)
@@ -1473,11 +1494,14 @@ function ui.newRow(w, i)
   local row = newFrame("Button", nil, w.list)
   if not row then return nil end
   row:SetHeight(ROW_H)
+  -- top corners only, so the height stays ROW_H whatever the game makes of an edge plus a centre anchor
   row:SetPoint("TOPLEFT", w.list, "TOPLEFT", 0, -(i - 1) * ROW_H)
-  row:SetPoint("RIGHT", w.list, "RIGHT", 0, 0)
+  row:SetPoint("TOPRIGHT", w.list, "TOPRIGHT", 0, -(i - 1) * ROW_H)
+  -- the game's list-row highlight (the quest log's)
   local hl = row:CreateTexture(nil, "HIGHLIGHT")
   hl:SetAllPoints()
-  setColor(hl, 1, 1, 1, 0.08)
+  hl:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+  try(hl.SetBlendMode, hl, "ADD")
   row.icon = row:CreateTexture(nil, "ARTWORK")
   row.icon:SetSize(16, 16)
   row.icon:SetPoint("LEFT", row, "LEFT", 2, 0)
@@ -1549,8 +1573,12 @@ function ui.makeChrome(key, title, width, height)
     f:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
   end
   if type(UISpecialFrames) == "table" then table.insert(UISpecialFrames, f:GetName() or name) end
-  local t = f:CreateFontString(nil, "OVERLAY", "GameFontHighlight")
-  t:SetPoint("TOP", f, "TOP", 0, framed and -5 or -12)
+  -- the template's own title when it has one, else the game's large gold font in the title bar
+  local t = f.TitleText
+  if not (t and t.SetText) then
+    t = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+    t:SetPoint("TOP", f, "TOP", 0, framed and -4 or -12)
+  end
   t:SetText(title)
   f:SetScript("OnHide", hideTooltip)
   return f, framed
@@ -1593,15 +1621,21 @@ function ui.makeView(w, host, width, height)
   w.list = list
   try(list.EnableMouseWheel, list, true)
   list:SetScript("OnMouseWheel", function(_, delta) ui.scroll(w, w.offset - delta * 3) end)
-  local sl = newFrame("Slider", nil, host)
+  -- a scroll bar in the game's slider art (the options sliders' track and the scroll bar knob)
+  local sl = newFrame("Slider", nil, host, "BackdropTemplate") or newFrame("Slider", nil, host)
   if sl then
     sl:SetOrientation("VERTICAL")
     sl:SetWidth(12)
     sl:SetPoint("TOPLEFT", list, "TOPRIGHT", 6, 0)
     sl:SetPoint("BOTTOMLEFT", list, "BOTTOMRIGHT", 6, 0)
-    local track = sl:CreateTexture(nil, "BACKGROUND")
-    track:SetAllPoints()
-    setColor(track, 0, 0, 0, 0.45)
+    if sl.SetBackdrop then
+      pcall(sl.SetBackdrop, sl, {
+        bgFile = "Interface\\Buttons\\UI-SliderBar-Background",
+        edgeFile = "Interface\\Buttons\\UI-SliderBar-Border",
+        tile = true, tileSize = 8, edgeSize = 8,
+        insets = { left = 3, right = 3, top = 6, bottom = 6 },
+      })
+    end
     sl:SetThumbTexture("Interface\\Buttons\\UI-ScrollBar-Knob")
     local thumb = try(sl.GetThumbTexture, sl)
     if thumb then thumb:SetSize(18, 24) end
@@ -1707,7 +1741,7 @@ function bankWindow.fill(w, row, it)
   row.icon:SetTexture(itemIcon(it.id) or QUESTION_ICON)
   row.label:SetText(it.name)
   row.label:SetTextColor(itemQualityColor(it.id))
-  row.right:SetText(it.count .. "   |cff8c8c8c" .. it.tab .. "|r")
+  row.right:SetText(it.count .. "   " .. gameColor("GRAY", true) .. it.tab .. "|r")
 end
 
 function bankWindow.enter(w, row, it)
@@ -1830,7 +1864,7 @@ function craftsWindow.build(w)
   if #idx.list > 0 and #out.rows == 0 then out.empty = "Nothing matches." end
   local nCrafters = 0
   for _ in pairs(crafterNames) do nCrafters = nCrafters + 1 end
-  out.footer = #out.rows .. " recipes, " .. nCrafters .. " crafters"
+  out.footer = #out.rows .. (#out.rows == 1 and " recipe, " or " recipes, ") .. nCrafters .. (nCrafters == 1 and " crafter" or " crafters")
   return out
 end
 
@@ -1838,8 +1872,8 @@ local MAX_NAMES = 3
 
 local function crafterText(c)
   if c.online then return ONLINE_ICON .. classHex(c.class) .. c.name .. "|r" end
-  if c.via then return ONLINE_ICON .. "|cffbbbbbb" .. c.name .. " (" .. c.via .. ")|r" end
-  return "|cff808080" .. c.name .. "|r"
+  if c.via then return ONLINE_ICON .. gameColor("HIGHLIGHT", true) .. c.name .. " (" .. c.via .. ")|r" end
+  return gameColor("GRAY", true) .. c.name .. "|r"
 end
 
 local function recipeLink(e)
@@ -1865,15 +1899,15 @@ function craftsWindow.enter(w, row, d)
   local tt = recipeTooltip(row, e.item, e.id, d.name)
   if not tt then return end
   try(tt.AddLine, tt, " ")
-  try(tt.AddLine, tt, d.prof .. ": who can make it", 1, 0.82, 0)
+  try(tt.AddLine, tt, d.prof .. ": who can make it", gameColor("NORMAL"))
   for _, c in ipairs(d.who) do
     local line = c.name .. " (" .. c.skill .. ")"
     if c.online then
-      try(tt.AddLine, tt, line .. ", online", 0.25, 1, 0.25)
+      try(tt.AddLine, tt, line .. ", online", gameColor("GREEN"))
     elseif c.via then
-      try(tt.AddLine, tt, line .. ", on " .. c.via, 0.6, 0.9, 0.6)
+      try(tt.AddLine, tt, line .. ", on " .. c.via, gameColor("HIGHLIGHT"))
     else
-      try(tt.AddLine, tt, line, 0.6, 0.6, 0.6)
+      try(tt.AddLine, tt, line, gameColor("GRAY"))
     end
   end
   try(tt.Show, tt)
@@ -1902,7 +1936,7 @@ function craftsWindow.fill(w, row, d)
   local e = d.e
   row.icon:SetTexture((e.item and itemIcon(e.item)) or (e.id and spellIcon(e.id)) or QUESTION_ICON)
   row.label:SetText(d.name)
-  if e.item then row.label:SetTextColor(itemQualityColor(e.item)) else row.label:SetTextColor(1, 1, 1) end
+  if e.item then row.label:SetTextColor(itemQualityColor(e.item)) else row.label:SetTextColor(gameColor("HIGHLIGHT")) end
   local x = w.nameWidth + 30
   local room = w.width - 40 - x - 30
   local shownCount = 0
@@ -1928,7 +1962,7 @@ function craftsWindow.fill(w, row, d)
     end
   end
   local more = #d.who - shownCount
-  row.right:SetText(more > 0 and ("|cff8c8c8c+" .. more .. "|r") or "")
+  row.right:SetText(more > 0 and (gameColor("GRAY", true) .. "+" .. more .. "|r") or "")
 end
 
 function craftsWindow.isEmpty()
@@ -2018,9 +2052,9 @@ function siteView.fill(w, row, r)
   else
     row.icon:SetTexture(nil)
   end
-  row.label:SetText(r.other and ("|cff808080" .. r.name .. "|r") or (classHex(r.class) .. r.name .. "|r"))
+  row.label:SetText(r.other and (gameColor("GRAY", true) .. r.name .. "|r") or (classHex(r.class) .. r.name .. "|r"))
   row.right:SetText((#r.missing > 0 and (ui.WARN .. " ") or "") .. (r.main and (ui.STAR .. " ") or "")
-    .. (r.other and "|cff808080" or "") .. r.level .. (r.other and "|r" or ""))
+    .. (r.other and gameColor("GRAY", true) or "") .. r.level .. (r.other and "|r" or ""))
 end
 
 function siteView.enter(w, row, r)
@@ -2028,17 +2062,17 @@ function siteView.enter(w, row, r)
   if not tt then return end
   try(tt.SetOwner, tt, row, "ANCHOR_RIGHT")
   try(tt.SetText, tt, r.name)
-  if r.main then try(tt.AddLine, tt, "Main", 1, 0.82, 0) end
-  if r.other then try(tt.AddLine, tt, "Another guild", 0.6, 0.6, 0.6) end
-  try(tt.AddLine, tt, "Level " .. r.level .. ", last recorded " .. ago(r.updated), 1, 1, 1)
+  if r.main then try(tt.AddLine, tt, "Main", gameColor("NORMAL")) end
+  if r.other then try(tt.AddLine, tt, "Another guild", gameColor("GRAY")) end
+  try(tt.AddLine, tt, "Level " .. r.level .. ", last recorded " .. ago(r.updated), gameColor("HIGHLIGHT"))
   for _, p in ipairs(r.profs) do
     local hint = siteView.hint(p)
     if hint then
-      try(tt.AddLine, tt, p.name .. " " .. p.skill .. ": " .. hint, 1, 0.82, 0)
+      try(tt.AddLine, tt, p.name .. " " .. p.skill .. ": " .. hint, gameColor("NORMAL"))
     elseif p.gather then
-      try(tt.AddLine, tt, p.name .. " " .. p.skill, 0.6, 0.6, 0.6)
+      try(tt.AddLine, tt, p.name .. " " .. p.skill, gameColor("GRAY"))
     else
-      try(tt.AddLine, tt, p.name .. " " .. p.skill .. ": " .. p.recipes .. " recipes", 0.25, 1, 0.25)
+      try(tt.AddLine, tt, p.name .. " " .. p.skill .. ": " .. p.recipes .. " recipes", gameColor("GREEN"))
     end
   end
   try(tt.Show, tt)
@@ -2164,7 +2198,7 @@ function guildView.build(w)
     end
   end
   if #list > 0 and #out.rows == 0 then out.empty = "Nothing matches." end
-  out.footer = #list .. " players, " .. playing .. " online"
+  out.footer = #list .. (#list == 1 and " player, " or " players, ") .. playing .. " online"
   return out
 end
 
@@ -2176,7 +2210,7 @@ function guildView.fill(w, row, c)
   else
     row.icon:SetTexture(nil)
   end
-  local name = c.online and (classHex(c.class) .. c.name .. "|r") or ("|cff808080" .. c.name .. "|r")
+  local name = c.online and (classHex(c.class) .. c.name .. "|r") or (gameColor("GRAY", true) .. c.name .. "|r")
   row.label:SetText((c.isMain and "" or "      ") .. (c.online and ONLINE_ICON or "") .. name)
   row.right:SetText(c.level > 0 and tostring(c.level) or "")
 end
@@ -2186,11 +2220,14 @@ function guildView.enter(w, row, c)
   if not tt then return end
   try(tt.SetOwner, tt, row, "ANCHOR_RIGHT")
   try(tt.SetText, tt, c.name)
-  try(tt.AddLine, tt, c.isMain and "Main" or ("Alt of " .. c.main), 0.55, 0.8, 1)
-  if c.level > 0 then try(tt.AddLine, tt, "Level " .. c.level, 1, 1, 1) end
+  try(tt.AddLine, tt, c.isMain and "Main" or ("Alt of " .. c.main), gameColor("NORMAL"))
+  if c.level > 0 then try(tt.AddLine, tt, "Level " .. c.level, gameColor("HIGHLIGHT")) end
   local profs = profText(c)
-  if profs ~= "" then try(tt.AddLine, tt, profs, 0.8, 0.8, 0.8, true) end
-  if c.online then try(tt.AddLine, tt, "Click to whisper", 0.6, 0.6, 0.6) end
+  if profs ~= "" then
+    local r, g, b = gameColor("HIGHLIGHT")
+    try(tt.AddLine, tt, profs, r, g, b, true)
+  end
+  if c.online then try(tt.AddLine, tt, "Click to whisper", gameColor("GRAY")) end
   try(tt.Show, tt)
 end
 
@@ -2245,7 +2282,7 @@ function ui.commandLines(...)
   for _, c in ipairs(COMMANDS) do
     for _, p in ipairs(prefixes) do
       if c[1] == p or c[1]:sub(1, #p + 1) == p .. " " then
-        out[#out + 1] = "|cffffd100" .. c[1] .. "|r  " .. c[2]
+        out[#out + 1] = gameColor("NORMAL", true) .. c[1] .. "|r  " .. c[2]
         break
       end
     end
@@ -2340,7 +2377,10 @@ function ui.tip(f, title, text)
     try(tt.SetOwner, tt, self, "ANCHOR_RIGHT")
     try(tt.SetText, tt, type(title) == "function" and title() or title)
     local t = type(text) == "function" and text() or text
-    if t then try(tt.AddLine, tt, t, 1, 1, 1, true) end
+    if t then
+      local r, g, b = gameColor("HIGHLIGHT")
+      try(tt.AddLine, tt, t, r, g, b, true)
+    end
     try(tt.Show, tt)
   end
   if f.HookScript then
@@ -2352,7 +2392,7 @@ function ui.tip(f, title, text)
   end
 end
 
--- A small button styled by colour (filters, choices, plain tabs).
+-- A small plain button styled by colour: only where the game's button templates are missing.
 function ui.choiceButton(parent, height)
   local b = newFrame("Button", nil, parent)
   if not b then return nil end
@@ -2367,37 +2407,84 @@ function ui.choiceButton(parent, height)
   return b
 end
 
--- Picked or not, shown by colour, never a size change.
+-- The game's red button (UIPanelButtonTemplate) with its label in b.text; the plain one without it.
+function ui.stockButton(parent, height)
+  local b = newFrame("Button", nil, parent, "UIPanelButtonTemplate")
+  if b then
+    b:SetHeight(height or 22)
+    b:SetText(" ")
+    b.text = b.Text or try(b.GetFontString, b)
+    if b.text and b.text.SetText then
+      b.stock = true
+      return b
+    end
+    b:Hide()
+  end
+  b = ui.choiceButton(parent, height)
+  if b then ui.styleChoice(b, false) end
+  return b
+end
+
+-- Picked or not: a stock button keeps its highlight lit; the plain one changes colour. Never a size change.
 function ui.styleChoice(b, picked)
   b.picked = picked and true or false
-  if picked then
-    b.text:SetTextColor(1, 0.82, 0)
+  if b.stock then
+    if picked then try(b.LockHighlight, b) else try(b.UnlockHighlight, b) end
+  elseif picked then
+    b.text:SetTextColor(gameColor("NORMAL"))
     setColor(b.bg, 0.35, 0.27, 0.05, 0.9)
   else
-    b.text:SetTextColor(0.75, 0.75, 0.75)
+    b.text:SetTextColor(gameColor("HIGHLIGHT"))
     setColor(b.bg, 0.12, 0.12, 0.12, 0.8)
   end
 end
 
--- A row of choices { value, label, tooltip? }; row.set(value) shows which is picked.
+-- A row of choices { value, label, tooltip? } as the game's radio buttons (plain buttons without the
+-- template); row.set(value) shows which is picked.
 function ui.choiceRow(parent, x, y, options, onPick)
   local row, cx = { buttons = {} }, x
   for i, o in ipairs(options) do
-    local b = ui.choiceButton(parent, 20)
+    local b, bw = newFrame("CheckButton", nil, parent, "UIRadioButtonTemplate"), nil
+    if b then
+      b.radio = true
+      b:SetSize(16, 16)
+      b:SetPoint("TOPLEFT", parent, "TOPLEFT", cx, y - 2)
+      b.text = b:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+      b.text:SetPoint("LEFT", b, "RIGHT", 2, 0)
+      b.text:SetText(o[2])
+      local lw = num(try(b.text.GetStringWidth, b.text), 40)
+      try(b.SetHitRectInsets, b, 0, -(lw + 2), 0, 0)
+      bw = 18 + lw + 10
+    else
+      b = ui.choiceButton(parent, 20)
+      if b then
+        b.text:SetText(o[2])
+        bw = num(try(b.text.GetStringWidth, b.text), 40) + 18
+        b:SetWidth(bw)
+        b:SetPoint("TOPLEFT", parent, "TOPLEFT", cx, y)
+        bw = bw + 4
+      end
+    end
     if b then
       b.value = o[1]
-      b.text:SetText(o[2])
-      local bw = num(try(b.text.GetStringWidth, b.text), 40) + 18
-      b:SetWidth(bw)
-      b:SetPoint("TOPLEFT", parent, "TOPLEFT", cx, y)
-      b:SetScript("OnClick", function(self) pcall(onPick, self.value) end)
+      b:SetScript("OnClick", function(self)
+        row.set(self.value)
+        pcall(onPick, self.value)
+      end)
       ui.tip(b, o[3] and o[2], o[3])
-      cx = cx + bw + 4
+      cx = cx + bw
       row.buttons[i] = b
     end
   end
   function row.set(value)
-    for _, b in ipairs(row.buttons) do ui.styleChoice(b, b.value == value) end
+    for _, b in ipairs(row.buttons) do
+      if b.radio then
+        b.picked = b.value == value
+        b:SetChecked(b.picked)
+      else
+        ui.styleChoice(b, b.value == value)
+      end
+    end
   end
   function row.show(on)
     for _, b in ipairs(row.buttons) do
@@ -2422,6 +2509,7 @@ function ui.check(parent, x, y, label, onClick, tip)
   cb.label = cb:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   cb.label:SetPoint("LEFT", cb, "RIGHT", 2, 1)
   cb.label:SetText(label)
+  try(cb.SetHitRectInsets, cb, 0, -(num(try(cb.label.GetStringWidth, cb.label), 40) + 2), 0, 0)
   cb:SetScript("OnClick", function(self) pcall(onClick, self:GetChecked() and true or false) end)
   ui.tip(cb, tip and label, tip)
   return cb
@@ -2461,12 +2549,12 @@ function ui.iconButton(parent, texture, size, title, text, onClick)
   return b
 end
 
--- A small "More" switch folding rarely used controls; its colour shows when it's open.
+-- A small "More" button folding rarely used controls; its highlight stays lit while it's open.
 function ui.more(parent, x, y, onToggle)
-  local b = ui.choiceButton(parent, 18)
+  local b = ui.stockButton(parent, 20)
   if not b then return nil end
   b.text:SetText("More")
-  b:SetWidth(num(try(b.text.GetStringWidth, b.text), 30) + 16)
+  b:SetWidth(num(try(b.text.GetStringWidth, b.text), 30) + 24)
   b:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
   b.open = false
   ui.styleChoice(b, false)
@@ -2482,7 +2570,7 @@ function panel.headerText()
   local me = readName()
   if myGuild() == "" then return me end
   local e = mainIndex()[me]
-  if e and e.main ~= me then return me .. "  |cff8c8c8c(alt of " .. e.main .. ")|r" end
+  if e and e.main ~= me then return me .. "  " .. gameColor("GRAY", true) .. "(alt of " .. e.main .. ")|r" end
   return me .. " " .. ui.STAR
 end
 
@@ -2704,16 +2792,22 @@ function panel.make()
     end
   end
 
-  -- the commands list behind the help icon, from the same list as /ff help
+  -- the commands list behind the help icon, from the same list as /ff help; it takes the page's place
+  -- (the page hides while it shows), so it needs no background of its own
   local c = newFrame("Frame", nil, f)
   if c then
     c:SetPoint("TOPLEFT", f, "TOPLEFT", 6, -54)
     c:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 6)
     try(c.SetFrameLevel, c, num(try(f.GetFrameLevel, f), 1) + 20)
     try(c.EnableMouse, c, true)
-    local bg = c:CreateTexture(nil, "BACKGROUND")
-    bg:SetAllPoints()
-    setColor(bg, 0.04, 0.04, 0.04, 0.96)
+    c:SetScript("OnShow", function()
+      local page = panel.pages[panel.current]
+      if page then page:Hide() end
+    end)
+    c:SetScript("OnHide", function()
+      local page = panel.pages[panel.current]
+      if page and ui.visible(f) then page:Show() end
+    end)
     local h = c:CreateFontString(nil, "OVERLAY", "GameFontNormal")
     h:SetPoint("TOPLEFT", c, "TOPLEFT", 12, -8)
     h:SetText("Commands")

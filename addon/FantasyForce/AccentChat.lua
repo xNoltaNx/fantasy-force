@@ -349,10 +349,12 @@ local function makeMailButton()
       local accent, strength = mailAccent()
       GameTooltip:SetOwner(self, "ANCHOR_TOP")
       GameTooltip:SetText("Accent")
+      -- the game's white (HIGHLIGHT_FONT_COLOR)
+      local c = type(HIGHLIGHT_FONT_COLOR) == "table" and HIGHLIGHT_FONT_COLOR or { r = 1, g = 1, b = 1 }
       if accent == "off" then
-        GameTooltip:AddLine("Rewrites this letter in your accent. Pick one first: /accent troll (or orc, tauren, undead, skyborne).", 1, 1, 1, true)
+        GameTooltip:AddLine("Rewrites this letter in your accent. Pick one first: /accent troll (or orc, tauren, undead, skyborne).", c.r, c.g, c.b, true)
       else
-        GameTooltip:AddLine("Rewrites this letter and its subject in your accent (" .. accent .. ", " .. strength .. "). Press again within 10 seconds to undo.", 1, 1, 1, true)
+        GameTooltip:AddLine("Rewrites this letter and its subject in your accent (" .. accent .. ", " .. strength .. "). Press again within 10 seconds to undo.", c.r, c.g, c.b, true)
       end
       GameTooltip:Show()
     end)

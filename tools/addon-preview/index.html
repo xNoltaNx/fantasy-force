@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Fantasy Force addon preview</title>
+<link rel="stylesheet" href="preview.css">
+</head>
+<body>
+<div id="page">
+  <div id="bar">
+    <b>Addon preview</b>
+    <input id="slash" placeholder="/ff status" title="Runs a slash command (/ff ..., /accent ..., /troll ...) as typed in chat" spellcheck="false">
+    <label title="The character's race (the accent's Auto follows it)">Race
+      <select id="race"><option>Troll</option><option>Orc</option><option>Tauren</option><option>Undead</option><option>Skyborne</option><option>Human</option></select>
+    </label>
+    <label title="Guild rank 1: what an officer's file also uploads"><input type="checkbox" id="officer"> Officer</label>
+    <label title="The game blocks the addon changing what you type (only /troll converts then)"><input type="checkbox" id="blocked"> Chat hook blocked</label>
+    <label title="A guild using the addon, or a fresh install with nothing recorded">Data
+      <select id="data"><option value="full">Full guild</option><option value="empty">Empty</option></select>
+    </label>
+    <button id="reset" title="Start over: no saved settings">Reset</button>
+    <span id="caught" title="Errors the addon caught itself (the game shows none of these)"></span>
+    <span id="note">Changes reload the pretend game; saved settings are kept.</span>
+  </div>
+  <div id="game">
+    <div id="scene"></div>
+    <div id="chat">
+      <div id="chatlog"></div>
+      <div id="chatbox"><span id="chatlabel">Say:</span><input id="chatinput" spellcheck="false" autocomplete="off"></div>
+    </div>
+    <div id="frames"></div>
+    <div id="tooltip"></div>
+    <div id="errorbox">
+      <div class="err-title">Lua Error <span class="err-count"></span></div>
+      <pre></pre>
+      <div class="err-buttons"><button class="err-prev">&lt;</button><button class="err-next">&gt;</button><button class="err-close">Okay</button></div>
+    </div>
+  </div>
+</div>
+<script src="fengari-web.js"></script>
+<script src="data.js"></script>
+<script src="preview.js"></script>
+<script>
+  // fit the 1440x900 page into whatever window shows it
+  (function fit() {
+    const page = document.getElementById('page');
+    const scale = () => {
+      const s = Math.min(1, window.innerWidth / 1440, window.innerHeight / 900);
+      page.style.transform = s < 1 ? `scale(${s})` : '';
+    };
+    window.addEventListener('resize', scale);
+    scale();
+  })();
+</script>
+</body>
+</html>
