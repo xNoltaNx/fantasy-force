@@ -59,7 +59,7 @@ FakeGame.QUALITY_COLORS = {
 }
 local FONTS = { "GameFontNormal", "GameFontHighlight", "GameFontNormalSmall", "GameFontHighlightSmall",
   "GameFontDisableSmall", "GameFontNormalLarge", "GameFontHighlightLarge", "GameFontDisable", "ChatFontNormal",
-  "NumberFontNormal" }
+  "NumberFontNormal", "NumberFontNormalSmall" }
 
 local function copy(t)
   local out = {}
@@ -104,7 +104,9 @@ function FakeGame.newClient(o)
   -- a template's named pieces: nil unless the template made them (any other capitalised key is a method)
   local PIECES = { Text = true, TitleText = true, TitleBg = true, CloseButton = true, Inset = true, InsetBg = true,
     Instructions = true, Icon = true, IconBorder = true, Count = true, NineSlice = true, Left = true, Middle = true,
-    Right = true, Bg = true }
+    Right = true, Bg = true, PortraitContainer = true, TitleContainer = true,
+    -- a portrait window's own methods (its mixin's): absent on other frames
+    SetTitle = true, SetPortraitToAsset = true, SetPortraitTextureRaw = true, GetPortrait = true }
   local mt = { __index = function(_, k)
     local m = Frame[k]
     if m ~= nil then return m end
@@ -177,7 +179,14 @@ function FakeGame.newClient(o)
     local old = f._scripts[s]
     f:SetScript(s, old and function(...) old(...) fn(...) end or fn)
   end
-  function Frame.RegisterEvent(f, ev) f._events[ev] = true client.eventFrames[#client.eventFrames + 1] = f end
+  -- a frame gets each event once, however many it registers
+  function Frame.RegisterEvent(f, ev)
+    f._events[ev] = true
+    if not f._listening then
+      f._listening = true
+      client.eventFrames[#client.eventFrames + 1] = f
+    end
+  end
   function Frame.UnregisterEvent(f, ev) f._events[ev] = nil end
   function Frame.IsEventRegistered(f, ev) return f._events[ev] and true or false end
 
@@ -372,6 +381,7 @@ function FakeGame.newClient(o)
   function Frame.SetCursorPosition(f, p) f._cursor = p end
   function Frame.SetMaxLetters(f, n) f._maxLetters = n end
   function Frame.GetMaxLetters(f) return f._maxLetters or 0 end
+  function Frame.SetNumeric(f, on) f._numeric = on and true or false end
   function Frame.Insert(f, t) f:Type((f._text or "") .. tostring(t)) end
 
   -- sliders
@@ -447,6 +457,42 @@ function FakeGame.newClient(o)
     f.Inset._template = "Inset"
     f.Inset:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -24)
     f.Inset:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 4)
+  end
+  -- the game's portrait window: gold-trimmed border (NineSlice), a round portrait in a gold ring at the top-left,
+  -- the title in a title container, the close X, an inset well and a button bar (hidden by
+  -- ButtonFrameTemplate_HideButtonBar). The ring is a stand-in path the preview draws.
+  function TEMPLATES.PortraitFrameTemplate(f)
+    f.NineSlice = mock("Frame", nil, f)
+    f.NineSlice._template = "PortraitNineSlice"
+    f.NineSlice:SetAllPoints(f)
+    f.PortraitContainer = mock("Frame", nil, f)
+    f.PortraitContainer:SetSize(62, 62)
+    f.PortraitContainer:SetPoint("TOPLEFT", f, "TOPLEFT", -5, 7)
+    f.PortraitContainer._level = (f._level or 1) + 5
+    f.PortraitContainer.portrait = f.PortraitContainer:CreateTexture(nil, "ARTWORK")
+    f.PortraitContainer.portrait:SetAllPoints(f.PortraitContainer)
+    local ring = f.PortraitContainer:CreateTexture(nil, "OVERLAY")
+    ring:SetSize(80, 80)
+    ring:SetPoint("CENTER", f.PortraitContainer, "CENTER", 0, 0)
+    ring:SetTexture("Interface\\FrameGeneral\\PreviewPortraitRing")
+    f.TitleContainer = mock("Frame", nil, f)
+    f.TitleContainer:SetPoint("TOPLEFT", f, "TOPLEFT", 58, -1)
+    f.TitleContainer:SetPoint("TOPRIGHT", f, "TOPRIGHT", -24, -1)
+    f.TitleContainer:SetHeight(20)
+    f.TitleContainer.TitleText = fontString(f.TitleContainer, "GameFontNormal")
+    f.TitleContainer.TitleText:SetPoint("TOP", f.TitleContainer, "TOP", 0, -5)
+    f.CloseButton = env.CreateFrame("Button", nil, f, "UIPanelCloseButton")
+    f.CloseButton:SetPoint("TOPRIGHT", f, "TOPRIGHT", 4, 5)
+    f.SetTitle = function(self, t) self.TitleContainer.TitleText:SetText(t) end
+    f.GetPortrait = function(self) return self.PortraitContainer.portrait end
+    f.SetPortraitToAsset = function(self, path) self.PortraitContainer.portrait:SetTexture(path) end
+  end
+  function TEMPLATES.ButtonFrameTemplate(f)
+    TEMPLATES.PortraitFrameTemplate(f)
+    f.Inset = mock("Frame", nil, f)
+    f.Inset._template = "Inset"
+    f.Inset:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -60)
+    f.Inset:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 26)
   end
   function TEMPLATES.UIPanelCloseButton(f)
     f:SetSize(24, 24)
@@ -576,6 +622,38 @@ function FakeGame.newClient(o)
   end }
   env.SlashCmdList = {}
   env.InCombatLockdown = function() return client.combat and true or false end
+  env.SetPortraitToTexture = function(tex, path) tex:SetTexture(path) end
+  env.ButtonFrameTemplate_HideButtonBar = function(f)
+    if f.Inset then f.Inset:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 4) end
+  end
+  -- key bindings: the player's (client.bindings[command] = { keys }) and override bindings by owner frame;
+  -- changing an override from addon code in combat is blocked, like the game's
+  client.bindings = { OPENCHAT = { "ENTER" }, OPENCHATSLASH = { "/" }, REPLY = { "R" } }
+  client.overrides = {}
+  env.GetBindingKey = function(command) return table.unpack(client.bindings[command] or {}) end
+  env.SetOverrideBinding = function(owner, _, key, command)
+    if client.combat and fromAddon(2) then
+      client.fire("ADDON_ACTION_BLOCKED", "FantasyForce", "SetOverrideBinding()")
+      error("SetOverrideBinding is blocked in combat", 2)
+    end
+    client.overrides[owner] = client.overrides[owner] or {}
+    client.overrides[owner][key] = command
+    client.bindingChanges = (client.bindingChanges or 0) + 1
+  end
+  env.ClearOverrideBindings = function(owner)
+    if client.combat and fromAddon(2) then
+      client.fire("ADDON_ACTION_BLOCKED", "FantasyForce", "ClearOverrideBindings()")
+      error("ClearOverrideBindings is blocked in combat", 2)
+    end
+    client.overrides[owner] = nil
+  end
+  -- What a key does now: an override first, else the player's binding.
+  function client.keyCommand(key)
+    for _, keys in pairs(client.overrides) do if keys[key] then return keys[key] end end
+    for command, keys in pairs(client.bindings) do
+      for _, k in ipairs(keys) do if k == key then return command end end
+    end
+  end
   env.NUM_CHAT_WINDOWS = 1
   env.ChatTypeInfo = { SAY = { r = 1, g = 1, b = 1 }, YELL = { r = 1, g = 0.25, b = 0.25 }, GUILD = { r = 0.25, g = 1, b = 0.25 },
     OFFICER = { r = 0.25, g = 0.75, b = 0.25 }, PARTY = { r = 0.67, g = 0.67, b = 1 }, RAID = { r = 1, g = 0.5, b = 0 },
@@ -647,13 +725,25 @@ function FakeGame.newClient(o)
     return guild, o.rankName or "Raider", o.rankIndex or 3
   end
   env.CanEditOfficerNote = function() return guild ~= "" and (o.rankIndex or 3) <= 1 end
-  local function roster() return o.roster and o.roster() or {} end
+  env.CanViewOfficerNote = env.CanEditOfficerNote
+  -- the roster: { name, class, level, rank, rankIndex, zone, note, officerNote, online, lastOnline = days }; a client
+  -- with rosterDelay has none until the test says it arrived (client.rosterReady = true)
+  local function roster()
+    if o.rosterDelay and not client.rosterReady then return {} end
+    return o.roster and o.roster() or {}
+  end
   env.GetNumGuildMembers = function() return #roster() end
   env.GetGuildRosterInfo = function(i)
     local m = roster()[i]
     if not m then return nil end
     return m.name .. "-Realm", m.rank or "Raider", m.rankIndex or 3, m.level or 60, m.class, m.zone or "Orgrimmar",
-      m.note or "", "", m.online and true or false, 0, m.class
+      m.note or "", m.officerNote or "", m.online and true or false, 0, m.class
+  end
+  env.GetGuildRosterLastOnline = function(i)
+    local m = roster()[i]
+    if not m or m.online then return nil end
+    local d = m.lastOnline or 0
+    return math.floor(d / 365), math.floor((d % 365) / 30), d % 365 % 30, 0
   end
   env.GetProfessions = function()
     if not o.profs then return nil end
@@ -684,14 +774,19 @@ function FakeGame.newClient(o)
     end or nil,
   }
   env.C_Item = {
-    GetItemNameByID = function(id) local it = item(id) return it and it.name end,
+    -- an item marked uncached has no name or info until the test loads it (then GET_ITEM_INFO_RECEIVED)
+    GetItemNameByID = function(id) local it = item(id) return it and not it.uncached and it.name or nil end,
     GetItemIconByID = function(id) local it = item(id) return it and it.icon or 134400 end,
-    GetItemQualityByID = function(id) local it = item(id) return it and it.quality end,
+    GetItemQualityByID = function(id) local it = item(id) return it and not it.uncached and it.quality or nil end,
+    -- name, link, quality, item level, required level (items say ilvl and level)
     GetItemInfo = function(id)
       local it = item(id)
-      if it then return it.name, itemLink(id), it.quality or 1 end
+      if it and not it.uncached then return it.name, itemLink(id), it.quality or 1, it.ilvl or 0, it.level or 0 end
     end,
-    RequestLoadItemDataByID = function() end,
+    RequestLoadItemDataByID = function(id)
+      client.itemRequests = client.itemRequests or {}
+      client.itemRequests[tonumber(id) or 0] = true
+    end,
     -- id, type, subtype, equip slot, icon, class id, subclass id (items say classID and sub)
     GetItemInfoInstant = function(id)
       local it = item(id)

@@ -14,8 +14,12 @@
 --        tab  = name;item;item...   item = itemId[:count] (count left out when 1)
 --   A  one account's characters in the guild (subject = the account's random id):  main~char~char...
 --        char = name;class;level;prof;prof...   prof = name:skill
---   R  a request (subject = the asker):     bankUpdated~name:updated;...~accountId:updated;...
---        "send me anything newer than these" (the account list came later: older readers skip it)
+--   R  a request (subject = the asker):     bankUpdated~name:updated;...~accountId:updated;...~requestId:updated;...
+--        "send me anything newer than these" (the account and craft request lists came later: older
+--        readers skip them, and an R without the craft request list gets no craft requests back)
+--   Q  a craft request (subject = its id, asker@recipeKey):  qty~mats~state~claimer~created~class~item~name~note
+--        state o (open), c (claimed), d (done), x (cancelled); name only when the key has no id; the note
+--        last, cut so the whole request fits in one message
 -- Numbers are base 36. Names are escaped (%XX) wherever they hold a separator, "%", "|" or a control
 -- character. Receivers ignore a protocol digit they don't know and fields past the ones they read.
 
@@ -243,15 +247,17 @@ local function decodeStamps(field)
   return out
 end
 
--- stamps = { [characterName] = updated }, accounts = { [accountId] = updated }
-function S.encodeRequest(bankUpdated, stamps, accounts)
-  return S.b36(bankUpdated) .. "~" .. encodeStamps(stamps) .. "~" .. encodeStamps(accounts)
+-- stamps = { [characterName] = updated }, accounts = { [accountId] = updated }, requests = { [requestId] = updated }
+function S.encodeRequest(bankUpdated, stamps, accounts, requests)
+  return S.b36(bankUpdated) .. "~" .. encodeStamps(stamps) .. "~" .. encodeStamps(accounts) .. "~" .. encodeStamps(requests)
 end
 
+-- requests is nil when the asker's addon doesn't know craft requests (it sent no fourth field).
 function S.decodeRequest(body)
   if type(body) ~= "string" then return nil end
   local parts = split(body, "~")
-  return { bank = S.unb36(parts[1]) or 0, crafters = decodeStamps(parts[2]), accounts = decodeStamps(parts[3]) }
+  return { bank = S.unb36(parts[1]) or 0, crafters = decodeStamps(parts[2]), accounts = decodeStamps(parts[3]),
+    requests = parts[4] and decodeStamps(parts[4]) or nil }
 end
 
 -- ---------------------------------------------------------------- accounts --
@@ -388,6 +394,31 @@ function S.mainIndex(accounts)
   return index
 end
 
+-- A guild member's main from their public note, only when it says so plainly: "alt of Morwen", "Morwen's alt",
+-- "main: Morwen", "Morwen alt" (any case). The name must be a member (names = the guild's names; a one-word
+-- note name also matches a member whose name starts with that word, when only one does). nil otherwise.
+local NOTE_WORD = "([^%s,%.!%?:;=%(%)%[%]\"]+)"
+S.NOTE_PATTERNS = { "%f[%w]alt of%s+" .. NOTE_WORD, NOTE_WORD .. "'s alt%f[%W]", "%f[%w]main%s*[:=%-]?%s*" .. NOTE_WORD,
+  NOTE_WORD .. "%s+alt%f[%W]" }
+
+function S.mainFromNote(note, names, self)
+  if type(note) ~= "string" or note == "" then return nil end
+  local lower = note:lower()
+  local exact, first = {}, {}
+  for _, n in ipairs(names or {}) do
+    local l = n:lower()
+    exact[l] = n
+    local w = l:match("^(%S+)")
+    if w then first[w] = (first[w] == nil) and n or false end
+  end
+  for _, pat in ipairs(S.NOTE_PATTERNS) do
+    local w = lower:match(pat)
+    local found = w and (exact[w] or first[w] or nil)
+    if found and found ~= self then return found end
+  end
+  return nil
+end
+
 -- --------------------------------------------------------------- chunking --
 
 local function header(kind, subject, updated, idx, total)
@@ -461,6 +492,146 @@ function S.assemble(state, sender, msg, now)
   if p.have < p.total then return nil, h end
   state.partial[key] = nil
   return { kind = h.kind, subject = h.subject, updated = h.updated, sender = sender, body = concat(p.parts) }, h
+end
+
+-- ---------------------------------------------------------- craft requests --
+-- A guildmate asks the guild's crafters to make a recipe. One request per recipe per asker at a time: its id
+-- is asker@recipeKey, the Crafting tab's key ("Engineering#s19790": the profession, then s and the spell id,
+-- i and the item id, or n and the lower-case name). The newest `updated` wins, except that a done or
+-- cancelled request stays so (a claim sent before it heard can't bring it back) until the asker asks again
+-- (a newer `created`). Every request is dropped 7 days after it was made, whatever its state.
+-- request = { asker, class, prof, key, spell, item, name, qty, mats, note, state, claimer, created, updated }
+
+S.REQUEST_MAX_AGE = 7 * 86400
+S.NOTE_MAX = 60
+S.QTY_MAX = 999
+local STATE_LETTER = { open = "o", claimed = "c", done = "d", cancelled = "x" }
+local LETTER_STATE = { o = "open", c = "claimed", d = "done", x = "cancelled" }
+
+function S.craftRequestId(asker, key)
+  return tostring(asker or "") .. "@" .. tostring(key or "")
+end
+
+-- { asker, key, prof, spell or item or lname } from an id, or nil when it isn't one.
+function S.parseCraftRequestId(id)
+  if type(id) ~= "string" then return nil end
+  local asker, key = id:match("^([^@]+)@(.+)$")
+  if not asker then return nil end
+  local prof, kind, ref = key:match("^(.+)#([sin])(.+)$")
+  if not prof then return nil end
+  local out = { asker = asker, key = key, prof = prof }
+  if kind == "s" then out.spell = tonumber(ref) elseif kind == "i" then out.item = tonumber(ref) else out.lname = ref end
+  if kind ~= "n" and not (out.spell or out.item) then return nil end
+  return out
+end
+
+-- Open or claimed, and not yet 7 days old.
+function S.requestActive(r, now)
+  return type(r) == "table" and (r.state == "open" or r.state == "claimed")
+    and (tonumber(r.created) or 0) + S.REQUEST_MAX_AGE > (tonumber(now) or 0)
+end
+
+local function dropLastLetter(s)
+  local i = #s
+  while i > 1 do
+    local b = strbyte(s, i)
+    if b < 128 or b >= 192 then break end
+    i = i - 1
+  end
+  return strsub(s, 1, i - 1)
+end
+
+-- A note as it's kept and sent: no links or colours (|), no control characters, at most NOTE_MAX letters.
+function S.cleanNote(s)
+  s = tostring(s or ""):gsub("|", ""):gsub("%c", " "):gsub("^%s+", ""):gsub("%s+$", "")
+  local count, i, n = 0, 1, #s
+  while i <= n do
+    local c = strbyte(s, i)
+    count = count + 1
+    if count > S.NOTE_MAX then return strsub(s, 1, i - 1) end
+    i = i + (c >= 240 and 4 or c >= 224 and 3 or c >= 192 and 2 or 1)
+  end
+  return s
+end
+
+-- The body of request id as of r.updated; the note is cut (by whole letters) so it all fits in one message.
+function S.encodeCraftRequest(id, r)
+  local named = not (r.spell or r.item)
+  local head = concat({ S.b36(r.qty), r.mats and "1" or "0", STATE_LETTER[r.state] or "o", S.esc(r.claimer or ""),
+    S.b36(r.created), S.esc(r.class or ""), S.b36(r.item), named and S.esc(r.name or "") or "" }, "~") .. "~"
+  local room = S.MAX_MESSAGE - #header("Q", id, r.updated, 1, 1)
+  local note = S.cleanNote(r.note)
+  local body = head .. S.esc(note)
+  while #body > room and note ~= "" do
+    note = dropLastLetter(note)
+    body = head .. S.esc(note)
+  end
+  return body
+end
+
+function S.decodeCraftRequest(id, updated, body)
+  local p = S.parseCraftRequestId(id)
+  if not p or type(body) ~= "string" then return nil end
+  local f = split(body, "~")
+  local state, created = LETTER_STATE[f[3] or ""], S.unb36(f[5])
+  if not state or not created or created < 1 then return nil end
+  local claimer = (f[4] and f[4] ~= "") and S.unesc(f[4]) or nil
+  if state == "claimed" and not claimer then state = "open" end
+  local item = S.unb36(f[7])
+  local qty = S.unb36(f[1]) or 1
+  return { asker = p.asker, prof = p.prof, key = p.key, spell = p.spell, item = p.item or (item and item > 0 and item) or nil,
+    name = (f[8] and f[8] ~= "") and S.unesc(f[8]) or nil, qty = math.max(1, math.min(S.QTY_MAX, qty)), mats = f[2] == "1",
+    state = state, claimer = state ~= "open" and claimer or nil, created = created, class = S.unesc(f[6]),
+    note = f[9] and S.cleanNote(S.unesc(f[9])) or "", updated = tonumber(updated) or created }
+end
+
+-- Keeps a request when it's newer (by the rules above). Returns true when it replaced what was there.
+function S.storeCraftRequest(reqs, id, r, now, from)
+  if type(r) ~= "table" or not S.parseCraftRequestId(id) then return false end
+  local created = tonumber(r.created) or 0
+  if created + S.REQUEST_MAX_AGE <= (tonumber(now) or 0) then return false end
+  local old = reqs[id]
+  if type(old) == "table" then
+    local oldCreated = tonumber(old.created) or 0
+    if created < oldCreated then return false end
+    if created == oldCreated then
+      if (tonumber(old.updated) or 0) >= (tonumber(r.updated) or 0) then return false end
+      if (old.state == "done" or old.state == "cancelled") and (r.state == "open" or r.state == "claimed") then return false end
+    end
+  end
+  r.from, r.heard = from, now
+  reqs[id] = r
+  return true
+end
+
+-- Drops requests 7 days old, whatever their state.
+function S.pruneCraftRequests(reqs, now)
+  for id, r in pairs(reqs) do
+    if type(r) ~= "table" or (tonumber(r.created) or 0) + S.REQUEST_MAX_AGE <= now then reqs[id] = nil end
+  end
+end
+
+-- What one account sees, active requests only, newest first, each { id, r }: forYou (open, and one of its
+-- characters can make it), taken (claimed, one of its characters can make it) and mine (its own characters'
+-- requests). names = { [characterName] = true } on this account; keys = { [recipeKey] = true } it can make.
+function S.craftRequestView(reqs, now, names, keys)
+  local v = { forYou = {}, taken = {}, mine = {} }
+  for id, r in pairs(reqs or {}) do
+    if S.requestActive(r, now) then
+      local list
+      if names[r.asker] then list = v.mine
+      elseif keys[r.key] then list = r.state == "open" and v.forYou or v.taken end
+      if list then list[#list + 1] = { id = id, r = r } end
+    end
+  end
+  local function newest(a, b)
+    if a.r.created ~= b.r.created then return a.r.created > b.r.created end
+    return a.id < b.id
+  end
+  sort(v.forYou, newest)
+  sort(v.taken, newest)
+  sort(v.mine, newest)
+  return v
 end
 
 -- ---------------------------------------------------------------- storing --

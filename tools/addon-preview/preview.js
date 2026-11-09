@@ -20,7 +20,7 @@
     GameFontNormal: [12, '#ffd100'], GameFontHighlight: [12, '#ffffff'], GameFontDisable: [12, '#808080'],
     GameFontNormalSmall: [10, '#ffd100'], GameFontHighlightSmall: [10, '#ffffff'], GameFontDisableSmall: [10, '#808080'],
     GameFontNormalLarge: [16, '#ffd100'], GameFontHighlightLarge: [16, '#ffffff'], ChatFontNormal: [14, '#ffffff', true],
-    NumberFontNormal: [13, '#ffffff', true],
+    NumberFontNormal: [13, '#ffffff', true], NumberFontNormalSmall: [11, '#ffffff', true],
   };
   const fontOf = (name) => FONTS[name] || FONTS.GameFontNormal;
   const fontCss = (name) => { const f = fontOf(name); return `${f[0]}px ${f[2] ? CHATFONT : FRIZ}`; };
@@ -52,6 +52,9 @@
     'interface\\dialogframe\\ui-dialog-icon-alertnew': svg('<path d="M16 3L30 28H2z" fill="#f2b705" stroke="#3a2600" stroke-width="2" stroke-linejoin="round"/><rect x="14.4" y="11" width="3.2" height="9" rx="1.2" fill="#1a1000"/><circle cx="16" cy="23.6" r="1.9" fill="#1a1000"/>'),
     'interface\\friendsframe\\informationicon': svg('<circle cx="16" cy="16" r="13" fill="#1d2f52" stroke="#d8b23a" stroke-width="2.5"/><circle cx="16" cy="10" r="2.2" fill="#fff"/><rect x="14" y="14" width="4" height="10" rx="1.4" fill="#fff"/>'),
     'interface\\chatframe\\ui-chaticon-chat-up': svg('<circle cx="16" cy="16" r="14" fill="#2a2018" stroke="#8a7650" stroke-width="2"/><path d="M8 10.5h16a2 2 0 0 1 2 2v7a2 2 0 0 1-2 2h-8l-5 4v-4H8a2 2 0 0 1-2-2v-7a2 2 0 0 1 2-2z" fill="#f3e3b5" stroke="#5a4a2a" stroke-width="1"/>'),
+    // the gold-and-bronze ring the portrait window draws around its portrait (the fake template's stand-in path)
+    'interface\\framegeneral\\previewportraitring': svg('<defs><linearGradient id="pr" x1="0" y1="0" x2="1" y2="1"><stop offset="0" stop-color="#fff0b8"/><stop offset=".25" stop-color="#d9b25a"/><stop offset=".55" stop-color="#7a5a22"/><stop offset=".8" stop-color="#c99a3e"/><stop offset="1" stop-color="#4a3410"/></linearGradient></defs><circle cx="40" cy="40" r="34" fill="none" stroke="#120d05" stroke-width="10"/><circle cx="40" cy="40" r="34" fill="none" stroke="url(#pr)" stroke-width="7"/><circle cx="40" cy="40" r="30.2" fill="none" stroke="#2a1e08" stroke-width="1.2"/><circle cx="40" cy="40" r="37.6" fill="none" stroke="#f6e2a0" stroke-opacity=".55" stroke-width="1"/>', '0 0 80 80'),
+    'interface\\raidframe\\readycheck-ready': svg('<path d="M6 17l6.5 6.5L26 9" fill="none" stroke="#0b3a0b" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/><path d="M6 17l6.5 6.5L26 9" fill="none" stroke="#3ce13c" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>'),
     'interface\\friendsframe\\statusicon-online': svg('<circle cx="16" cy="16" r="9" fill="#2fd12f" stroke="#0b4a0b" stroke-width="2.5"/>'),
     'interface\\moneyframe\\ui-goldicon': svg('<circle cx="16" cy="16" r="11" fill="#f5c542" stroke="#7a5600" stroke-width="2.5"/>'),
     'interface\\moneyframe\\ui-silvericon': svg('<circle cx="16" cy="16" r="11" fill="#d8d8e0" stroke="#5c5c66" stroke-width="2.5"/>'),

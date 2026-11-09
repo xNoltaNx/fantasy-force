@@ -113,6 +113,13 @@ local function shareGuild()
     deliver("B", world.bankBefore.by, world.bankBefore.updated, S.encodeBank(world.bankBefore), world.bankBefore.sender)
   end
   deliver("B", world.bank.by, world.bank.updated, S.encodeBank(world.bank), world.bank.sender)
+  for _, r in ipairs(world.requests or {}) do
+    if S.encodeCraftRequest then
+      local id = S.craftRequestId(r.asker, r.key)
+      r.updated = r.created + (r.claimer and 600 or 0)
+      deliver("Q", id, r.updated, S.encodeCraftRequest(id, r), r.sender)
+    end
+  end
 end
 
 -- settings: race, officer, blocked, data ("full" or "empty"); saved: the SavedVariables of the last
@@ -125,7 +132,7 @@ function P.start(race, officer, blocked, data, savedDB, savedChar, openTab, scre
   local db, charDB
   if savedDB and savedDB ~= "" then db = assert(load("return " .. savedDB, "=FantasyForceDB", "t", {}))() end
   if savedChar and savedChar ~= "" then charDB = assert(load("return " .. savedChar, "=FantasyForceCharDB", "t", {}))() end
-  if not db and data == "full" then db = { characters = copy(world.own), raids = copy(world.raids) } end
+  if not db and data == "full" then db = { characters = copy(world.own), raids = copy(world.raids), personal = copy(world.personal) } end
   local roster = world.roster
   client = FakeGame.newClient({
     name = world.player.name, class = world.player.class, className = "Hunter", race = RACES[race] or RACES.Orc,
@@ -141,6 +148,7 @@ function P.start(race, officer, blocked, data, savedDB, savedChar, openTab, scre
     after = function(sec, fn) timers[#timers + 1] = { at = HOST_now() + (tonumber(sec) or 0), fn = fn } end,
     roster = function() return roster end,
     profs = world.player.profs, items = world.items, spells = world.spells, money = 1234567,
+    bags = data == "full" and { [0] = world.personal[world.player.name].bags } or nil,
     sendAddon = function() return 0 end,
     onSend = function(msg, chatType, _, target)
       chatEvent(chatType == "WHISPER" and "WHISPER_INFORM" or chatType, world.player.name, msg, target)
@@ -162,6 +170,8 @@ function P.start(race, officer, blocked, data, savedDB, savedChar, openTab, scre
     client.fire("ADDON_ACTION_BLOCKED", "FantasyForce", "SendChatMessage()")
   end
   if data == "full" then
+    -- the server's answer to the addon's roster request (the pretend game doesn't send it by itself)
+    client.fire("GUILD_ROSTER_UPDATE")
     shareGuild()
     for _, l in ipairs(world.guildChat) do chatEvent("GUILD", l[1], l[2]) end
   end

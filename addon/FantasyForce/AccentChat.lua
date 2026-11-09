@@ -22,7 +22,10 @@ local UNDO_SECONDS = 10
 
 -- mode: "line" once the accent line is made ("none" if this game can't make one); blocked: the game
 -- blocked something of ours (blockedWhat names it); debug: /accent debug reports the next line sent.
-local hooks = { mode = nil, inSend = false, blocked = false, blockedWhat = nil, told = false, debug = false }
+-- seen: every blocked action the game reported this session, whoever it names (newest first, a few kept);
+-- bound: the keys our Enter override is on; bindPending: a change waiting for the end of combat.
+local hooks = { mode = nil, inSend = false, blocked = false, blockedWhat = nil, told = false, debug = false, seen = {},
+  bound = nil, bindPending = false }
 local mail = {}
 local line = {}
 
@@ -66,6 +69,7 @@ end
 local function changed()
   if type(ns.onSettingChanged) == "function" then pcall(ns.onSettingChanged) end
   if line.refresh then pcall(line.refresh) end
+  if line.bindEnter then pcall(line.bindEnter) end
 end
 
 -- /troll <message>: one message in troll to the chat the box is on.
@@ -201,13 +205,14 @@ function line.switch()
   f:SetText(rest)
 end
 
--- Enter: the line goes out in the accent (when it's on and the chat is on its list), then closes.
+-- Enter: the line goes out in the accent (when it's on and the chat is on its list), then closes. One send per
+-- press, straight from the key (SendChatMessage to Say and Yell needs the key press itself: never a timer).
 function line.send()
   local f = line.frame
   local text = str(try(f.GetText, f))
   if text:match("^%s*$") then return line.close() end
   if text:sub(1, 1) == "/" then
-    print_("slash commands go in the game's chat box; this line is for talking (/s, /g, /w Name switch it).")
+    print_("Commands: press / to type them in the game's chat box.")
     return
   end
   local out = convertOutgoing(text, line.chatType)
@@ -278,12 +283,43 @@ function FantasyForce_OpenAccentLine()
   pcall(line.open)
 end
 
+-- "Enter opens it": while an accent is on (and the setting is), every key bound to the game's Open Chat (usually
+-- Enter) opens the accent line instead, through override bindings on a frame of ours: the sanctioned way, never
+-- saved, gone the moment we clear them. "/" (Open Chat with a slash) and Reply stay the game's. Bindings can't
+-- change in combat: a change then waits for the end of combat.
+function line.enterWanted()
+  local c = charDB()
+  return hooks.mode == "line" and not hooks.blocked and c.enterOpens ~= false and current() ~= "off"
+end
+
+function line.bindEnter()
+  if type(SetOverrideBinding) ~= "function" or type(ClearOverrideBindings) ~= "function" or not CreateFrame then return end
+  if try(InCombatLockdown) then
+    hooks.bindPending = true
+    return
+  end
+  hooks.bindPending = false
+  line.binder = line.binder or CreateFrame("Frame")
+  local keys = {}
+  if line.enterWanted() then
+    for _, k in ipairs({ try(GetBindingKey, "OPENCHAT", false) }) do
+      if type(k) == "string" and k ~= "" then keys[#keys + 1] = k end
+    end
+  end
+  local sig = table.concat(keys, " ")
+  if sig == hooks.bound then return end -- nothing to change (our own changes fire UPDATE_BINDINGS too)
+  hooks.bound = sig
+  pcall(ClearOverrideBindings, line.binder)
+  for _, k in ipairs(keys) do pcall(SetOverrideBinding, line.binder, false, k, "FANTASYFORCE_ACCENTLINE") end
+end
+
 local function installHooks()
   if hooks.mode then return end
   local f = line.make()
   line.makeBubble()
   hooks.mode = f and "line" or "none"
   line.refresh()
+  line.bindEnter()
 end
 
 local function tellOnceIfUnavailable()
@@ -325,6 +361,9 @@ local function withHint(s)
   local c = charDB()
   if c.accent == "off" or c.lineHinted or not canConvert() then return s end
   c.lineHinted = true
+  if c.enterOpens ~= false then
+    return s .. " Press Enter to talk in it (or the speech bubble by your chat tab); / and Reply still open the game's chat box."
+  end
   return s .. " Talk in it with the speech bubble by your chat tab (or /troll <message>); the game's chat box stays as typed."
 end
 
@@ -353,11 +392,36 @@ local function statusText()
 end
 
 -- /accent debug: what's in, what's blocked; the line says how the next message went.
+-- What the game said it blocked this session: "FantasyForce: SendChatMessage(); OtherAddon: CastSpellByName()".
+function line.blockedList()
+  if #hooks.seen == 0 then return "nothing" end
+  local parts = {}
+  for _, b in ipairs(hooks.seen) do parts[#parts + 1] = b.who .. ": " .. b.what end
+  return table.concat(parts, "; ")
+end
+
+-- A blocked-action event, whoever it names. Ours (the addon's name in any case) turns the line off and says so once.
+function line.onBlocked(event, arg1, arg2)
+  local who, what = str(arg1), str(arg2)
+  if event == "MACRO_ACTION_BLOCKED" then who, what = "a macro", str(arg1) end
+  if what == "" then what = event end
+  table.insert(hooks.seen, 1, { who = who ~= "" and who or "?", what = what })
+  hooks.seen[6] = nil
+  local low = who:lower():gsub("%s", "")
+  if event ~= "MACRO_ACTION_BLOCKED" and low == "fantasyforce" then
+    hooks.blocked = true -- nothing is converted from now on; what you type goes out as typed
+    hooks.blockedWhat = what
+    tellOnceIfUnavailable()
+    changed()
+  end
+end
+
 local function debugText()
   hooks.debug = true
   return "accent debug: game chat box hooks: none (by design). Accent line: " .. (line.frame and "ready" or "none")
     .. ", bubble: " .. (line.bubble and (line.bubble:IsShown() and "shown" or "hidden") or "none")
-    .. ". Blocked: " .. (hooks.blockedWhat and str(hooks.blockedWhat) or "nothing") .. "."
+    .. ". Blocked: " .. line.blockedList() .. "."
+    .. " Enter: " .. (hooks.bound and hooks.bound ~= "" and ("opens the line (" .. hooks.bound .. ")") or "the game's") .. "."
     .. (line.frame and " Send a line from the bubble: the next line says how it went." or "")
 end
 
@@ -391,6 +455,14 @@ local function setChatType(kind, on)
   c.chatTypes[str(kind):upper()] = on and true or nil
   changed()
   return statusText()
+end
+
+-- "Enter opens it" (on by default): while an accent is on, Enter opens the accent line.
+local function setEnterOpens(on)
+  if on then charDB().enterOpens = nil else charDB().enterOpens = false end
+  changed()
+  return on and "Enter opens the accent line while an accent is on (/ and Reply still open the game's chat box)."
+    or "Enter opens the game's chat box; the accent line is on the bubble and its key."
 end
 
 -- /accent with nothing after it: off remembers the accent and strength, on brings them back (the
@@ -551,7 +623,8 @@ end
 
 local frame = CreateFrame and CreateFrame("Frame") or nil
 if frame then
-  for _, ev in ipairs({ "PLAYER_LOGIN", "MAIL_SHOW", "ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN" }) do
+  for _, ev in ipairs({ "PLAYER_LOGIN", "MAIL_SHOW", "ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN", "MACRO_ACTION_BLOCKED",
+    "UPDATE_BINDINGS", "PLAYER_REGEN_ENABLED" }) do
     pcall(frame.RegisterEvent, frame, ev)
   end
   frame:SetScript("OnEvent", function(_, event, arg1, arg2)
@@ -561,11 +634,12 @@ if frame then
         tellOnceIfUnavailable()
       elseif event == "MAIL_SHOW" then
         makeMailButton()
-      elseif (event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN") and arg1 == "FantasyForce" then
-        hooks.blocked = true -- nothing is converted from now on; what you type goes out as typed
-        hooks.blockedWhat = str(arg2) ~= "" and arg2 or event
-        tellOnceIfUnavailable()
-        changed()
+      elseif event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN" or event == "MACRO_ACTION_BLOCKED" then
+        line.onBlocked(event, arg1, arg2)
+      elseif event == "UPDATE_BINDINGS" then
+        if hooks.mode then line.bindEnter() end -- Open Chat rebound: the override follows
+      elseif event == "PLAYER_REGEN_ENABLED" then
+        if hooks.bindPending then line.bindEnter() end
       end
     end)
   end)
@@ -574,6 +648,7 @@ end
 -- For the main file (its Whisper, Ask and link buttons use the line) and the tests.
 ns.AccentChat = { installHooks = installHooks, hooks = hooks, current = current, convertOutgoing = convertOutgoing,
   charDB = charDB, setAccent = setAccent, setStrength = setStrength, setChatType = setChatType, toggle = toggle,
+  setEnterOpens = setEnterOpens, enterOpens = function() return charDB().enterOpens ~= false end,
   statusText = statusText, shortStatus = shortStatus, canConvert = canConvert, preview = preview, SAMPLE = SAMPLE,
   line = line, openLine = line.open, insertLink = line.insertLink, debugText = debugText,
   -- what the line holds, as typed in chat: "/w Grukka Hi!" for a whisper, else the text

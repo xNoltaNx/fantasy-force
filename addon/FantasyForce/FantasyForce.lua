@@ -74,6 +74,8 @@ local function initDB()
   if type(db.shared) ~= "table" then db.shared = {} end
   if type(db.shared.crafters) ~= "table" then db.shared.crafters = {} end
   if type(db.shared.accounts) ~= "table" then db.shared.accounts = {} end
+  -- craft requests, everyone's (asked over the guild channel; see the sharing section)
+  if type(db.requests) ~= "table" then db.requests = {} end
   return db
 end
 
@@ -277,6 +279,10 @@ local function requestRoster()
   end
 end
 
+-- What the roster says now that isn't saved: { [name] = { zone, officerNote } } (an officer note only when this
+-- character may see them). Shown in the Guild tab's tooltips; never in the saved file the site reads.
+local rosterLive = {}
+
 local function recordGuild()
   pcall(function()
     if not try(IsInGuild) then return end
@@ -288,11 +294,14 @@ local function recordGuild()
 
     local db = initDB()
     local members = {}
+    local canOfficer = try(C_GuildInfo and C_GuildInfo.CanViewOfficerNote) or try(CanViewOfficerNote)
+    rosterLive = {}
     for i = 1, total do
       -- name, rankName, rankIndex, level, classDisplayName, zone, publicNote,
       -- officerNote (never read into the record), isOnline, status, classFileName
-      local name, rank, rankIndex, level, _, _, note, _, online, _, classFile = try(GetGuildRosterInfo, i)
+      local name, rank, rankIndex, level, _, zone, note, officerNote, online, _, classFile = try(GetGuildRosterInfo, i)
       if type(name) == "string" and name ~= "" then
+        rosterLive[stripRealm(name)] = { zone = str(zone), officerNote = canOfficer and str(officerNote) or nil }
         local m = {
           name = stripRealm(name),
           rank = str(rank),
@@ -630,12 +639,38 @@ local function bankIds()
   local last = first + num(NUM_BANKBAGSLOTS, 7) - 1
   local ids = { -1 }
   for b = first, last do ids[#ids + 1] = b end
+  -- the reagent bank, on clients that have one
+  if type(REAGENTBANK_CONTAINER) == "number" then ids[#ids + 1] = REAGENTBANK_CONTAINER end
   return ids
+end
+
+-- This account's own characters' bags and banks, for the Bank tab's Mine: FantasyForceDB.personal[name] =
+-- { class, bags = items, bagsAt, bank = items, bankAt }. Private: never sent to the guild (only a bank alt's
+-- go out, as the guild bank), and kept apart from what the site reads.
+local function recordMine(withBank)
+  local db = initDB()
+  if type(db.personal) ~= "table" then db.personal = {} end
+  local me = readName()
+  if me == "" then return nil end
+  local p = type(db.personal[me]) == "table" and db.personal[me] or {}
+  db.personal[me] = p
+  local _, class = try(UnitClass, "player")
+  p.class = str(class) ~= "" and class or p.class
+  local bags = bagTab("Bags", bagIds())
+  p.bags, p.bagsAt = bags.items, time()
+  if withBank then
+    p.bank, p.bankAt = bagTab("Bank", bankIds()).items, time()
+  end
+  return p
 end
 
 local function recordAltBank(withBank)
   pcall(function()
-    if not isBankAlt() then return end
+    recordMine(withBank)
+    if not isBankAlt() then
+      if onDataChanged then onDataChanged() end -- the windows redraw; nothing of this is shared
+      return
+    end
     local db = initDB()
     local me = readName()
     local tabs = { bagTab("Bags", bagIds()) }
@@ -834,6 +869,8 @@ local share = {
 }
 local refreshWindows -- set in the windows section
 local alts = { index = nil } -- mains and alts: the index is rebuilt when what it's made of changes
+-- craft requests (Q payloads; the Crafting tab's Requests list and the badges are in the windows section)
+local asks = { REQ = "@requests", LINE_WINDOW = 180 }
 
 local function clock()
   local t = try(GetTime)
@@ -1056,6 +1093,135 @@ local function ownAccount()
   return a, v, sig
 end
 
+-- Craft requests: a guildmate asks for a recipe; the crafters who can make it see it, one takes it ("I'll
+-- make it"), the asker marks it done or cancels it. Kept in FantasyForceDB.requests (everyone's, so anyone
+-- online can pass them on to a crafter who was offline), rules in Sync.lua.
+
+-- A recipe's key, the same in the Crafting tab, the requests and the saved file.
+function asks.keyOf(prof, r)
+  return prof .. "#" .. (r.id and ("s" .. r.id) or r.item and ("i" .. r.item) or ("n" .. str(r.name):lower()))
+end
+
+function asks.mine(r)
+  return type(r) == "table" and initDB().characters[r.asker] ~= nil
+end
+
+-- The recipe keys this account's characters in this guild can make.
+function asks.keys()
+  local keys, guild = {}, myGuild()
+  if not Sync or guild == "" then return keys end
+  for _, rec in pairs(initDB().characters) do
+    local c = type(rec) == "table" and rec.guild == guild and Sync.crafterFromCharacter(rec)
+    for prof, p in pairs(c and c.professions or {}) do
+      for _, r in ipairs(p.recipes or {}) do keys[asks.keyOf(prof, r)] = true end
+    end
+  end
+  return keys
+end
+
+-- forYou, taken and mine (Sync.craftRequestView) for this account.
+function asks.view()
+  local db = initDB()
+  if not Sync then return { forYou = {}, taken = {}, mine = {} } end
+  local names = {}
+  for name in pairs(db.characters) do names[name] = true end
+  return Sync.craftRequestView(db.requests, time(), names, asks.keys())
+end
+
+function asks.changed()
+  if refreshWindows then refreshWindows() end
+end
+
+-- Keeps a request as it is now (new, or in a new state) and sends it to the guild.
+function asks.push(id, r)
+  local db = initDB()
+  local old, stamp = db.requests[id], time()
+  if type(old) == "table" and num(old.created, 0) == num(r.created, 0) and num(old.updated, 0) >= stamp then stamp = old.updated + 1 end
+  r.updated = stamp
+  db.requests[id] = r
+  enqueue("Q", id, stamp, Sync.encodeCraftRequest(id, r), 0, false)
+  asks.changed()
+end
+
+-- This character asks for a recipe entry (the Crafting tab's: key, prof, id, item, name). False when it
+-- already has an open request for it.
+function asks.create(e, qty, mats, note)
+  if not Sync or type(e) ~= "table" or not e.key then return false end
+  local me, now = readName(), time()
+  local id = Sync.craftRequestId(me, e.key)
+  if Sync.requestActive(initDB().requests[id], now) then return false end
+  local rec = initDB().characters[me]
+  asks.push(id, { asker = me, class = type(rec) == "table" and str(rec.class) or "", prof = e.prof, key = e.key,
+    spell = e.id, item = e.item, name = not (e.id or e.item) and e.name or nil,
+    qty = math.max(1, math.min(Sync.QTY_MAX, floor(num(qty, 1)))), mats = mats and true or false,
+    note = Sync.cleanNote(note), state = "open", created = now })
+  return true, id
+end
+
+-- "claimed" (by this character, someone else's open request), "done" or "cancelled" (this account's own).
+function asks.set(id, state)
+  local r = initDB().requests[id]
+  if not Sync or not Sync.requestActive(r, time()) then return false end
+  if state == "claimed" then
+    if r.state ~= "open" or asks.mine(r) then return false end
+    r.claimer = readName()
+  elseif state ~= "done" and state ~= "cancelled" or not asks.mine(r) then
+    return false
+  end
+  r.state = state
+  asks.push(id, r)
+  return true
+end
+
+-- A request arrived (or changed): the asker hears once who took theirs; the crafters may get the login line.
+function asks.arrived(id, r)
+  local st = syncState()
+  if type(st.claimsTold) ~= "table" then st.claimsTold = {} end
+  if r.state == "claimed" and r.claimer and asks.mine(r) then
+    local tag = r.claimer .. "@" .. num(r.created, 0)
+    if st.claimsTold[id] ~= tag then
+      st.claimsTold[id] = tag
+      print_(r.claimer .. " will make your " .. (asks.nameOf and asks.nameOf(r) or "craft") .. ".")
+    end
+  end
+  asks.changed()
+  asks.tellNew()
+end
+
+-- One line in the first minutes after login when there's something new for this account to make:
+-- "2 craft requests: /ff crafts" (which then opens on them). Each request is told about once.
+function asks.tellNew()
+  if share.askLineSaid or not share.loginAt or time() - share.loginAt > asks.LINE_WINDOW then return end
+  local st = syncState()
+  if type(st.requestsTold) ~= "table" then st.requestsTold = {} end
+  local n = 0
+  for _, x in ipairs(asks.view().forYou) do
+    if st.requestsTold[x.id] ~= x.r.created then
+      st.requestsTold[x.id] = x.r.created
+      n = n + 1
+    end
+  end
+  if n == 0 then return end
+  share.askLineSaid = true
+  local db = initDB()
+  if type(db.windows) ~= "table" then db.windows = {} end
+  db.windows.craftProf = asks.REQ
+  asks.pointed = true
+  print_(n .. (n == 1 and " craft request" or " craft requests") .. ": /ff crafts")
+end
+
+-- Requests 7 days old go, and what was told about them.
+function asks.prune()
+  if not Sync then return end
+  local db, st = initDB(), syncState()
+  Sync.pruneCraftRequests(db.requests, time())
+  for _, k in ipairs({ "requestsTold", "claimsTold" }) do
+    for id in pairs(type(st[k]) == "table" and st[k] or {}) do
+      if not db.requests[id] then st[k][id] = nil end
+    end
+  end
+end
+
 -- Sends what changed since it was last sent.
 local function shareOwn()
   if not canShare() then return end
@@ -1107,6 +1273,15 @@ local function answerRequest(req, asker)
       enqueue("A", id, acct.updated, Sync.encodeAccount(acct), rand(4, 12), true)
     end
   end
+  -- craft requests (only to an addon that knows them): the asker's own account answers first
+  if req.requests then
+    local now = time()
+    for id, r in pairs(db.requests) do
+      if type(r) == "table" and num(r.created, 0) + Sync.REQUEST_MAX_AGE > now and num(r.updated, 0) > num(req.requests[id], 0) then
+        enqueue("Q", id, r.updated, Sync.encodeCraftRequest(id, r), asks.mine(r) and rand(1, 3) or rand(4, 12), true)
+      end
+    end
+  end
 end
 
 -- Asks the guild for anything newer than what this client holds.
@@ -1127,8 +1302,12 @@ local function sendRequest()
   end
   local _, v = ownAccount()
   if v then accounts[accountId()] = v.updated end
+  local requests = {}
+  for id, r in pairs(db.requests) do
+    if type(r) == "table" then requests[id] = num(r.updated, 0) end
+  end
   st.lastRequest = time()
-  enqueue("R", readName(), time(), Sync.encodeRequest(bankStamp, stamps, accounts), 0, false)
+  enqueue("R", readName(), time(), Sync.encodeRequest(bankStamp, stamps, accounts, requests), 0, false)
 end
 
 -- A window opened: ask at most once an hour (every 5 minutes while there's nothing to show).
@@ -1161,6 +1340,9 @@ local function onPayload(p, who)
       alts.index = nil
       if refreshWindows then refreshWindows() end
     end
+  elseif p.kind == "Q" then
+    local r = Sync.decodeCraftRequest(p.subject, p.updated, p.body)
+    if r and Sync.storeCraftRequest(db.requests, p.subject, r, time(), who) then asks.arrived(p.subject, r) end
   elseif p.kind == "R" then
     local req = Sync.decodeRequest(p.body)
     if req then answerRequest(req, p.subject) end
@@ -1204,13 +1386,17 @@ local function onLogin()
   registerPrefix()
   if share.loginDone then return end
   share.loginDone = true
+  share.loginAt = time()
   after(rand(5, 20), function()
     if Sync then
       Sync.prune(initDB().shared.crafters, time(), CRAFTER_MAX_AGE)
       Sync.prune(initDB().shared.accounts, time(), CRAFTER_MAX_AGE)
     end
+    asks.prune()
     alts.index = nil
     shareOwn()
+    asks.changed()
+    asks.tellNew()
   end)
   -- mains and alts are wanted without opening a window; asked once a guild logging in together has
   -- pushed what it has, so answers only fill real gaps
@@ -1549,6 +1735,19 @@ function ui.render(w)
   w.items = data.rows
   local maxOffset = math.max(0, #w.items - w.visible)
   if w.offset > maxOffset then w.offset = maxOffset end
+  -- after a re-sort (a new order, or item data arriving), the picked row stays in view
+  if w.keepPick then
+    w.keepPick = nil
+    local want = w.master == asks.REQ and w.reqPick or w.pick
+    for i, d in ipairs(w.items) do
+      local here = d.key == want
+      for _, s in ipairs(d.slots or {}) do if s.key == want then here = true end end
+      if want ~= nil and here then
+        if i <= w.offset then w.offset = i - 1 elseif i > w.offset + w.visible then w.offset = math.min(maxOffset, i - w.visible) end
+        break
+      end
+    end
+  end
   if w.slider then
     w.slider:SetMinMaxValues(0, maxOffset)
     w.slider:SetValue(w.offset)
@@ -1606,9 +1805,40 @@ end
 
 -- A movable window with a title and a close button, its place remembered under key. Errors (a missing
 -- template or method) are caught by the caller.
-function ui.makeChrome(key, title, width, height)
+-- The portrait texture of a window made from the game's portrait templates, if it has one.
+function ui.portraitOf(f)
+  return (f.PortraitContainer and f.PortraitContainer.portrait) or f.portrait or try(f.GetPortrait, f)
+end
+
+-- Puts a picture in the template's portrait slot, through the template's own method when it has one, so the game
+-- draws its gold ring around it. True when it's in.
+function ui.setPortrait(f, path)
+  if type(f.SetPortraitToAsset) == "function" and pcall(f.SetPortraitToAsset, f, path) then return true end
+  if type(f.SetPortraitTextureRaw) == "function" and pcall(f.SetPortraitTextureRaw, f, path) then return true end
+  local tex = ui.portraitOf(f)
+  if not tex then return false end
+  if type(SetPortraitToTexture) == "function" and pcall(SetPortraitToTexture, tex, path) then return true end
+  return pcall(tex.SetTexture, tex, path) and true or false
+end
+
+-- The game's portrait window (ButtonFrameTemplate, else PortraitFrameTemplate): the gold-trimmed border and the
+-- ringed portrait at its top-left, like the game's own windows. Nil when this client has neither.
+function ui.portraitWindow(name)
+  for i, tpl in ipairs({ "ButtonFrameTemplate", "PortraitFrameTemplate" }) do
+    local f = newFrame("Frame", name .. (i == 1 and "" or "P"), UIParent, tpl)
+    if f and ui.portraitOf(f) then
+      try(ButtonFrameTemplate_HideButtonBar, f) -- no button bar along the bottom (ButtonFrameTemplate only)
+      f.ffPortrait = true
+      return f
+    end
+    if f then f:Hide() end
+  end
+  return nil
+end
+
+function ui.makeChrome(key, title, width, height, portrait)
   local name = "FantasyForce" .. key
-  local f = newFrame("Frame", name, UIParent, "BasicFrameTemplateWithInset")
+  local f = portrait and ui.portraitWindow(name) or newFrame("Frame", name .. (portrait and "B" or ""), UIParent, "BasicFrameTemplateWithInset")
   local framed = f and (f.CloseButton or f.TitleBg or f.Inset or f.InsetBg) and true or false
   if not framed then
     if not f then f = newFrame("Frame", name .. "B", UIParent, "BackdropTemplate") or newFrame("Frame", name .. "P", UIParent) end
@@ -1662,18 +1892,29 @@ function ui.makeChrome(key, title, width, height)
     if key == "ESCAPE" then
       if not fight then try(self.SetPropagateKeyboardInput, self, false) end
       self:Hide()
-      if not fight then after(0, function() try(self.SetPropagateKeyboardInput, self, true) end) end
+      -- put back next frame, unless a fight began in between (then it's put back on the next key out of combat)
+      if not fight then after(0, function()
+        if not try(InCombatLockdown) then try(self.SetPropagateKeyboardInput, self, true) end
+      end) end
     elseif not fight then
       try(self.SetPropagateKeyboardInput, self, true)
     end
   end)
   -- the template's own title when it has one, else the game's large gold font in the title bar
-  local t = f.TitleText
-  if not (t and t.SetText) then
-    t = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
-    t:SetPoint("TOP", f, "TOP", 0, framed and -4 or -12)
+  if not (type(f.SetTitle) == "function" and pcall(f.SetTitle, f, title)) then
+    local t = (f.TitleContainer and f.TitleContainer.TitleText) or f.TitleText
+    if not (t and t.SetText) then
+      t = f:CreateFontString(nil, "OVERLAY", "GameFontNormalLarge")
+      t:SetPoint("TOP", f, "TOP", 0, framed and -4 or -12)
+    end
+    t:SetText(title)
   end
-  t:SetText(title)
+  -- a portrait window: the inset (the game's darker content well) where the pages go, framed by the gold trim
+  if f.ffPortrait and f.Inset then
+    f.Inset:ClearAllPoints()
+    f.Inset:SetPoint("TOPLEFT", f, "TOPLEFT", 4, -54)
+    f.Inset:SetPoint("BOTTOMRIGHT", f, "BOTTOMRIGHT", -6, 4)
+  end
   f:SetScript("OnHide", hideTooltip)
   return f, framed
 end
@@ -1788,8 +2029,9 @@ end
 -- professions) with icons and counts, the items in the middle under foldable category headers, and the
 -- picked one on the right. These are its shared pieces: the left list, the grouping, the detail pane.
 
--- Both tabs' list sits between the left list and the detail pane.
-ui.MD = { noFilters = true, filterTop = -30, left = 164, rightInset = 262, searchX = 170, searchWidth = 170, emptyWidth = 300 }
+-- Both tabs' list sits between the left list and the detail pane, under a row of sort headers.
+ui.TICK = "|TInterface\\RaidFrame\\ReadyCheck-Ready:12:12|t" -- the ready check's green tick, in text
+ui.MD = { noFilters = true, filterTop = -52, left = 164, rightInset = 262, searchX = 170, searchWidth = 170, emptyWidth = 300 }
 function ui.md(w)
   for k, v in pairs(ui.MD) do if w[k] == nil then w[k] = v end end
   return w
@@ -1823,8 +2065,16 @@ function ui.category(item, name)
   return "Other"
 end
 
--- Items under their categories, alphabetical with "Other" last: { cats = { name }, items = { [cat] = list } }.
-function ui.group(items, catOf)
+-- By name, then tie, then key: a strict order whatever the names.
+function ui.byName(a, b)
+  if a.name ~= b.name then return a.name < b.name end
+  if tostring(a.tie or "") ~= tostring(b.tie or "") then return tostring(a.tie or "") < tostring(b.tie or "") end
+  return tostring(a.key or "") < tostring(b.key or "")
+end
+
+-- Items under their categories, alphabetical with "Other" last: { cats = { name }, items = { [cat] = list } },
+-- each category's items in less's order (by name when nil).
+function ui.group(items, catOf, less)
   local g = { cats = {}, items = {} }
   for _, it in ipairs(items) do
     local c = catOf(it)
@@ -1838,13 +2088,146 @@ function ui.group(items, catOf)
     if (a == "Other") ~= (b == "Other") then return b == "Other" end
     return a < b
   end)
-  for _, c in ipairs(g.cats) do
-    table.sort(g.items[c], function(a, b)
-      if a.name ~= b.name then return a.name < b.name end
-      return tostring(a.tie or "") < tostring(b.tie or "")
-    end)
-  end
+  for _, c in ipairs(g.cats) do table.sort(g.items[c], less or ui.byName) end
   return g
+end
+
+-- ------------------------------------------------------------------ sorting --
+-- One sort for both lists: column headers over the list (Name, Rarity, Lvl, and Crafters or Count), click
+-- to sort, again to reverse, remembered per tab; and Groups (on: within each category; off: one list).
+-- Level is the item's required level, else its item level; what has no item (or isn't known yet) goes last.
+
+ui.SORT_COLUMNS = { { "name", "Name", 168 }, { "rarity", "Rarity", 54, "Best first; again for worst first." },
+  { "level", "Lvl", 40, "Required level (else item level), low first; again for high first." }, { "count", nil, 60 } }
+
+function ui.sortState(w)
+  local st = ui.state()
+  local s = st[w.key .. "Sort"]
+  if type(s) ~= "table" or not s.key then
+    s = { key = "name" }
+    st[w.key .. "Sort"] = s
+  end
+  return s
+end
+
+function ui.sortBy(w, key)
+  local s = ui.sortState(w)
+  if s.key == key then s.desc = not s.desc or nil else s.key, s.desc = key, nil end
+  w.keepPick = true
+  pcall(ui.render, w)
+end
+
+function ui.grouped(w)
+  return not ui.state()[w.key .. "Flat"]
+end
+
+-- An item's quality, required level and item level, from the game when it has them (kept in
+-- FantasyForceDB.itemFacts so the next login sorts at once), else as last known (the game is asked to load it).
+function ui.itemFacts(id)
+  id = tonumber(id)
+  if not id then return nil end
+  local db = initDB()
+  if type(db.itemFacts) ~= "table" then db.itemFacts = {} end
+  local _, _, q, ilvl, minLvl = itemInfo(id)
+  if type(q) == "number" then
+    local f = db.itemFacts[id]
+    if type(f) ~= "table" or f.q ~= q or f.r ~= tonumber(minLvl) or f.i ~= tonumber(ilvl) then
+      f = { q = q, r = tonumber(minLvl), i = tonumber(ilvl) }
+      db.itemFacts[id] = f
+    end
+    return f
+  end
+  try(C_Item and C_Item.RequestLoadItemDataByID, id)
+  local f = db.itemFacts[id]
+  return type(f) == "table" and f or nil
+end
+
+-- What an item sorts by: "rarity" (quality) or "level" (required, else item level), nil when unknown.
+function ui.itemSortValue(id, key)
+  local f = id and ui.itemFacts(id)
+  if not f then return nil end
+  if key == "rarity" then return tonumber(f.q) end
+  if num(f.r, 0) > 0 then return f.r end
+  if num(f.i, 0) > 0 then return f.i end
+  return nil
+end
+
+-- The order for the picked sort; each item's value is worked out once (d.sv, by w.sortValue(d, key)).
+-- Rarity and count put the most first, level the lowest; again reverses; unknown values go last either way.
+function ui.sorter(w, items)
+  local s = ui.sortState(w)
+  if s.key == "name" then
+    return s.desc and function(a, b) return ui.byName(b, a) end or ui.byName
+  end
+  for _, d in ipairs(items) do d.sv = w.sortValue(d, s.key) end
+  local bigFirst = s.key ~= "level"
+  return function(a, b)
+    local va, vb = a.sv, b.sv
+    if (va == nil) ~= (vb == nil) then return va ~= nil end
+    if va ~= nil and va ~= vb then
+      local first = (bigFirst and va > vb) or (not bigFirst and va < vb)
+      if s.desc then first = not first end
+      return first
+    end
+    return ui.byName(a, b)
+  end
+end
+
+-- The list's rows: under category headers (Groups on) or one list, in the picked order. emit(list) adds a
+-- group's rows (the Bank's grid adds bag slots).
+function ui.arrange(w, items, catOf, out, emit)
+  local less = ui.sorter(w, items)
+  if not ui.grouped(w) then
+    table.sort(items, less)
+    emit(items)
+    return
+  end
+  local g = ui.group(items, catOf, less)
+  for _, cat in ipairs(g.cats) do
+    local list = g.items[cat]
+    out.rows[#out.rows + 1] = { header = true, cat = cat, count = #list, collapsed = w.collapsed[cat] and true or false }
+    if not w.collapsed[cat] then emit(list) end
+  end
+end
+
+-- The level, small and grey, in front of the row's count while the list is sorted by level.
+function ui.levelPrefix(w, d)
+  if ui.sortState(w).key ~= "level" then return "" end
+  return gameColor("GRAY", true) .. (d.sv and tostring(d.sv) or "-") .. "|r   "
+end
+
+-- The header row and the Groups tick (x: where the tick goes on the search row).
+function ui.makeSortHeaders(w, host, countLabel, countTip, groupsX)
+  w.sortHeaders = {}
+  local x = w.left
+  for _, c in ipairs(ui.SORT_COLUMNS) do
+    local key = c[1]
+    local b = ui.columnHeader(host, "FantasyForce" .. w.key .. "Sort" .. key, x, -28, c[3], c[2] or countLabel,
+      function() ui.sortBy(w, key) end)
+    if b then
+      ui.tip(b, c[2] or countLabel, c[4] or (key == "name" and "A to Z; again for Z to A." or countTip))
+      w.sortHeaders[key] = b
+    end
+    x = x + c[3]
+  end
+  w.groupsBox = ui.check(host, groupsX, -2, "Groups", function(on)
+    ui.state()[w.key .. "Flat"] = not on or nil
+    w.offset, w.keepPick = 0, true
+    pcall(ui.render, w)
+  end, "On: sorted within each category. Off: one list, sorted across them all.")
+end
+
+-- After a redraw: the sorted column in gold, the Groups tick, both hidden when shown is false.
+function ui.drawSortHeaders(w, shown)
+  local s = ui.sortState(w)
+  for key, b in pairs(w.sortHeaders or {}) do
+    if b.text then b.text:SetTextColor(gameColor(key == s.key and "NORMAL" or "HIGHLIGHT")) end
+    if shown then b:Show() else b:Hide() end
+  end
+  if w.groupsBox then
+    w.groupsBox:SetChecked(ui.grouped(w))
+    if shown then w.groupsBox:Show() else w.groupsBox:Hide() end
+  end
 end
 
 -- A category's header row: + or -, its name in gold, how many in it.
@@ -1916,24 +2299,38 @@ function ui.masterButton(w, i)
   b.count = b:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
   b.count:SetPoint("RIGHT", b, "RIGHT", -4, 0)
   b:SetScript("OnClick", function(self)
+    if self.head then return end
     w.master, w.offset = self.value, 0
     ui.state()[w.masterKey] = self.value or "All"
     pcall(ui.render, w)
   end)
+  ui.tip(b, function() return b.tip end, function() return b.tipText end)
   w.masterButtons[i] = b
   return b
 end
 
+-- the left list: { { value (nil for All), label, icon, count, tip, tipText } }, and group headings { head = true,
+-- label, count (any text) } in gold, not clickable
 function ui.drawMaster(w, entries)
   for i, m in ipairs(entries) do
     local b = ui.masterButton(w, i)
     if b then
-      b.value = m.value
-      b.icon:SetTexture(m.icon or QUESTION_ICON)
-      b.text:SetText(m.label)
-      b.text:SetTextColor(gameColor(m.value == w.master and "NORMAL" or "HIGHLIGHT"))
-      b.count:SetText(tostring(m.count or 0))
-      if m.value == w.master then b.sel:Show() else b.sel:Hide() end
+      b.value, b.head, b.tip, b.tipText = m.value, m.head, m.tip, m.tipText
+      if m.head then
+        b.icon:SetTexture(nil)
+        b.text:SetText(m.label)
+        b.text:SetTextColor(gameColor("NORMAL"))
+        b.count:SetText(tostring(m.count or ""))
+        b.sel:Hide()
+        try(b.Disable, b)
+      else
+        try(b.Enable, b)
+        b.icon:SetTexture(m.icon or QUESTION_ICON)
+        b.text:SetText(m.label)
+        b.text:SetTextColor(gameColor(m.value == w.master and "NORMAL" or "HIGHLIGHT"))
+        b.count:SetText(tostring(m.count or 0))
+        if m.value == w.master then b.sel:Show() else b.sel:Hide() end
+      end
       b:Show()
     end
   end
@@ -2050,7 +2447,8 @@ function ui.drawDetail(w, top, none)
       end
       l.text:ClearAllPoints()
       l.text:SetPoint("TOPLEFT", w.frame, "TOPLEFT", tx, ly - 4)
-      l.text:SetWidth((spec.button or spec.a) and (104 - (tx - x)) or (230 - (tx - x)))
+      local bw = spec.button and (spec.button.width or 58) or 0
+      l.text:SetWidth((spec.a and 104 or spec.button and (224 - bw) or 230) - (tx - x))
       l.text:SetText(spec.text or "")
       l.text:SetTextColor(gameColor(spec.head and "NORMAL" or spec.color or "HIGHLIGHT"))
       for _, col in ipairs({ { l.a, spec.a, 130 }, { l.b, spec.b, 162 } }) do
@@ -2064,8 +2462,9 @@ function ui.drawDetail(w, top, none)
       if l.button and spec.button then
         l.button.spec = spec.button
         l.button.text:SetText(spec.button.label)
+        l.button:SetWidth(bw)
         l.button:ClearAllPoints()
-        l.button:SetPoint("TOPLEFT", w.frame, "TOPLEFT", x + 170, ly)
+        l.button:SetPoint("TOPLEFT", w.frame, "TOPLEFT", x + 228 - bw, ly)
         if spec.button.enabled == false then l.button:Disable() else l.button:Enable() end
       end
     end
@@ -2092,79 +2491,136 @@ local function bankData()
   return own or sh
 end
 
--- The Bank: its tabs on the left (Bags and Bank for a bank alt), its items in the middle under their
--- categories, as a list or as bag slots (Grid), and the picked item on the right: how many and where, when
--- it was recorded, what changed since the scan before, and Ask (a whisper to the bank alt for one).
+-- The Bank: on the left two groups, Guild (the guild bank: All, then its tabs, or a bank alt's Bags and Bank) and
+-- Mine (All mine, then each of this account's characters); its items in the middle under their categories, as a
+-- list or as bag slots (Grid), and the picked item on the right: how many and where, when it was recorded, what
+-- changed since the scan before, and Ask (a whisper to the bank alt for one). At the bottom of the left list, Set
+-- bank alt (or Bank alt, ticked, on the one that is).
 local bankWindow = ui.md({ key = "Bank", nameWidth = 236, masterKey = "bankSource", pickKey = "bankPick" })
 bankWindow.ICONS = { All = "Interface\\Icons\\INV_Box_01", Bags = "Interface\\Icons\\INV_Misc_Bag_08",
-  Bank = "Interface\\Icons\\INV_Box_02", Tab = "Interface\\Icons\\INV_Misc_Bag_10" }
+  Bank = "Interface\\Icons\\INV_Box_02", Tab = "Interface\\Icons\\INV_Misc_Bag_10", Mine = "Interface\\Icons\\INV_Misc_Bag_07" }
 bankWindow.SLOT, bankWindow.PER_LINE = 37, 7
+bankWindow.MINE, bankWindow.CHAR = "@mine", "@char:"
+
+-- This account's characters with recorded bags, by name: { name, class, tabs = { Bags, Bank }, bagsAt, bankAt }.
+function bankWindow.mine()
+  local out = {}
+  local db = initDB()
+  for name, p in pairs(type(db.personal) == "table" and db.personal or {}) do
+    if type(p) == "table" and db.characters[name] then
+      local tabs = { { name = "Bags", items = type(p.bags) == "table" and p.bags or {} } }
+      if type(p.bank) == "table" then tabs[2] = { name = "Bank", items = p.bank } end
+      out[#out + 1] = { name = name, class = str(p.class), tabs = tabs, bagsAt = p.bagsAt, bankAt = p.bankAt }
+    end
+  end
+  table.sort(out, function(a, b) return a.name < b.name end)
+  return out
+end
+
+-- Items once each, from pieces { owner, tab, items }: count and where ({ owner, tab, count }).
+function bankWindow.collect(pieces)
+  local byId, list = {}, {}
+  for _, pc in ipairs(pieces) do
+    for _, it in ipairs(pc.items) do
+      local id = type(it) == "table" and tonumber(it.id)
+      if id then
+        local e = byId[id]
+        if not e then
+          local name = itemName(id) or str(it.name)
+          e = { id = id, key = id, name = name ~= "" and name or ("Item " .. id), count = 0, where = {}, tie = id }
+          byId[id] = e
+          list[#list + 1] = e
+        end
+        local n = floor(num(it.count, 1))
+        e.count = e.count + n
+        e.where[#e.where + 1] = { owner = pc.owner, tab = pc.tab, count = n }
+      end
+    end
+  end
+  return list
+end
+
+local function distinct(tabs)
+  local seen, n = {}, 0
+  for _, t in ipairs(tabs) do
+    for _, it in ipairs(t.items) do
+      local id = type(it) == "table" and tonumber(it.id)
+      if id and not seen[id] then seen[id], n = true, n + 1 end
+    end
+  end
+  return n
+end
 
 function bankWindow.build(w)
   ui.loadState(w)
   w.grid = ui.state().bankGrid and true or false
-  local out = { rows = {}, filters = {}, footer = "", empty = "No bank yet. The bank alt types /ff bankalt.", masters = {} }
-  local bank = bankData()
+  local out = { rows = {}, filters = {}, footer = "", masters = {},
+    empty = "No bank alt yet: on the character that keeps the guild's things, press Set bank alt (bottom left)." }
+  local bank, mine = bankData(), bankWindow.mine()
   w.bank, w.items_ = bank, {}
-  if not bank then return out end
-  local search = searchText(w)
-  local known, byId, list, all = {}, {}, {}, 0
-  for _, t in ipairs(bank.tabs) do
-    local tab = str(type(t) == "table" and t.name)
-    if type(t) == "table" and type(t.items) == "table" then
-      known[tab] = true
-      out.masters[#out.masters + 1] = { value = tab, label = tab, count = #t.items,
-        icon = t.icon or bankWindow.ICONS[tab] or bankWindow.ICONS.Tab }
-      all = all + #t.items
+  local known = { [bankWindow.MINE] = true }
+  local guildTabs = {}
+  out.masters[1] = { head = true, label = "Guild", count = bank and moneyText(bank.money) or "" }
+  if bank then
+    for _, t in ipairs(bank.tabs) do
+      if type(t) == "table" and type(t.items) == "table" then guildTabs[#guildTabs + 1] = { name = str(t.name), items = t.items, icon = t.icon } end
+    end
+    out.masters[#out.masters + 1] = { value = nil, label = "All", count = distinct(guildTabs), icon = bankWindow.ICONS.All }
+    for _, t in ipairs(guildTabs) do
+      known[t.name] = true
+      out.masters[#out.masters + 1] = { value = t.name, label = t.name, count = #t.items,
+        icon = t.icon or bankWindow.ICONS[t.name] or bankWindow.ICONS.Tab }
     end
   end
-  table.insert(out.masters, 1, { value = nil, label = "All", count = all, icon = bankWindow.ICONS.All })
+  out.masters[#out.masters + 1] = { head = true, label = "Mine" }
+  local allMine = {}
+  for _, c in ipairs(mine) do for _, t in ipairs(c.tabs) do allMine[#allMine + 1] = t end end
+  out.masters[#out.masters + 1] = { value = bankWindow.MINE, label = "All mine", count = distinct(allMine), icon = bankWindow.ICONS.Mine }
+  for _, c in ipairs(mine) do
+    local value = bankWindow.CHAR .. c.name
+    known[value] = true
+    out.masters[#out.masters + 1] = { value = value, label = classHex(c.class) .. c.name .. "|r", count = distinct(c.tabs),
+      icon = bankWindow.ICONS.Bags, tip = c.name,
+      tipText = c.bankAt and ("Bank seen " .. ago(c.bankAt) .. ", bags " .. ago(c.bagsAt) .. ".") or "Open your bank once (on " .. c.name .. ")." }
+  end
   if w.master and not known[w.master] then w.master = nil end
-  -- one entry per item (All adds a tab's items to the others'), with where it is
-  for _, t in ipairs(bank.tabs) do
-    local tab = str(type(t) == "table" and t.name)
-    if type(t) == "table" and type(t.items) == "table" and (w.master == nil or w.master == tab) then
-      for _, it in ipairs(t.items) do
-        local id = type(it) == "table" and tonumber(it.id)
-        if id then
-          local e = byId[id]
-          if not e then
-            local name = itemName(id) or str(it.name)
-            e = { id = id, key = id, name = name ~= "" and name or ("Item " .. id), count = 0, where = {}, tie = id }
-            byId[id] = e
-            list[#list + 1] = e
-          end
-          local n = floor(num(it.count, 1))
-          e.count = e.count + n
-          e.where[#e.where + 1] = { tab = tab, count = n }
-        end
+  -- what's picked: the guild's (All or a tab) or mine (all, or one character)
+  local pieces = {}
+  w.mineShown = w.master == bankWindow.MINE or (type(w.master) == "string" and w.master:sub(1, #bankWindow.CHAR) == bankWindow.CHAR)
+  if w.mineShown then
+    for _, c in ipairs(mine) do
+      if w.master == bankWindow.MINE or w.master == bankWindow.CHAR .. c.name then
+        for _, t in ipairs(c.tabs) do pieces[#pieces + 1] = { owner = c.name, tab = t.name, items = t.items } end
       end
     end
+    out.empty = #mine == 0 and "Nothing of yours yet: log in on each character (and open its bank once)." or "Nothing here."
+  elseif bank then
+    for _, t in ipairs(guildTabs) do
+      if w.master == nil or w.master == t.name then pieces[#pieces + 1] = { tab = t.name, items = t.items } end
+    end
+  else
+    return out
   end
+  local list, search = bankWindow.collect(pieces), searchText(w)
   local shown = {}
   for _, e in ipairs(list) do
     if search == "" or e.name:lower():find(search, 1, true) then shown[#shown + 1] = e end
   end
-  local g = ui.group(shown, function(e) return ui.category(e.id, e.name) end)
-  for _, cat in ipairs(g.cats) do
-    local items = g.items[cat]
-    out.rows[#out.rows + 1] = { header = true, cat = cat, count = #items, collapsed = w.collapsed[cat] and true or false }
-    if not w.collapsed[cat] then
-      if w.grid then
-        -- bag slots, a line of them every two rows
-        for i = 1, #items, bankWindow.PER_LINE do
-          local slots = {}
-          for j = i, math.min(#items, i + bankWindow.PER_LINE - 1) do slots[#slots + 1] = items[j] end
-          out.rows[#out.rows + 1] = { slots = slots }
-          out.rows[#out.rows + 1] = { filler = true }
-        end
-      else
-        for _, e in ipairs(items) do out.rows[#out.rows + 1] = e end
+  ui.arrange(w, shown, function(e) return ui.category(e.id, e.name) end, out, function(items)
+    if w.grid then
+      -- bag slots, a line of them every two rows
+      for i = 1, #items, bankWindow.PER_LINE do
+        local slots = {}
+        for j = i, math.min(#items, i + bankWindow.PER_LINE - 1) do slots[#slots + 1] = items[j] end
+        out.rows[#out.rows + 1] = { slots = slots }
+        out.rows[#out.rows + 1] = { filler = true }
       end
+    else
+      for _, e in ipairs(items) do out.rows[#out.rows + 1] = e end
     end
-  end
+  end)
   w.items_ = shown
-  if #shown == 0 then out.empty = search ~= "" and "Nothing matches." or "Nothing here." end
+  if #shown == 0 and #list > 0 then out.empty = "Nothing matches." elseif #list == 0 and not w.mineShown then out.empty = "Nothing here." end
   out.footer = #shown .. (#shown == 1 and " item" or " items")
   return out
 end
@@ -2266,8 +2722,14 @@ function bankWindow.fill(w, row, d)
   row.icon:SetTexture(itemIcon(d.id) or QUESTION_ICON)
   row.label:SetText(d.name)
   row.label:SetTextColor(itemQualityColor(d.id))
-  row.right:SetText(tostring(d.count))
+  row.right:SetText(ui.levelPrefix(w, d) .. tostring(d.count))
   if w.pick == d.key then row.sel:Show() else row.sel:Hide() end
+end
+
+-- What a bank item sorts by (Count: how many).
+function bankWindow.sortValue(e, key)
+  if key == "count" then return e.count end
+  return ui.itemSortValue(e.id, key)
 end
 
 function bankWindow.enter(w, row, d)
@@ -2307,6 +2769,23 @@ function bankWindow.askText(id, name)
 end
 
 -- The picked item on the right.
+-- One of your own items: where it is, character by character ("Kettle: Bags 4, Bank 10"), and the total.
+function bankWindow.describeMine(w, e)
+  if not e then return nil end
+  local lines, order, by = {}, {}, {}
+  for _, p in ipairs(e.where) do
+    if not by[p.owner] then
+      by[p.owner] = {}
+      order[#order + 1] = p.owner
+    end
+    table.insert(by[p.owner], p.tab .. " " .. p.count)
+  end
+  for _, owner in ipairs(order) do lines[#lines + 1] = { text = owner .. ": " .. table.concat(by[owner], ", ") } end
+  if #e.where > 1 then lines[#lines + 1] = { text = "Total", a = tostring(e.count), color = "NORMAL" } end
+  return { item = e.id, icon = itemIcon(e.id), name = e.name, color = { itemQualityColor(e.id) }, link = itemLink(e.id),
+    sub = ui.category(e.id, e.name), lines = lines }
+end
+
 function bankWindow.describe(w, e)
   local bank = w.bank
   if not (e and bank) then return nil end
@@ -2345,8 +2824,17 @@ end
 
 function bankWindow.make(w, host)
   ui.makeMasterDetail(w, host)
-  w.gold = host:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-  w.gold:SetJustifyH("LEFT")
+  -- Set bank alt, at the bottom of the left list: the same setting as Options > Bank alt and /ff bankalt
+  w.altButton = ui.stockButton(host, 20)
+  if w.altButton then
+    w.altButton:SetWidth(150)
+    w.altButton:SetPoint("BOTTOMLEFT", host, "BOTTOMLEFT", 6, 24)
+    w.altButton:SetScript("OnClick", function() pcall(ui.setBankAlt, not isBankAlt()) end)
+    ui.tip(w.altButton, function() return isBankAlt() and "Bank alt" or "Set bank alt" end, function()
+      if isBankAlt() then return readName() .. "'s bags and bank are shared as the guild bank. Click to stop sharing them." end
+      return "Share this character's bags and bank as the guild bank."
+    end)
+  end
   w.view = ui.stockButton(host, 20)
   if w.view then
     w.view:SetWidth(56)
@@ -2359,13 +2847,13 @@ function bankWindow.make(w, host)
     end)
     ui.tip(w.view, "View", "A list, or bag slots.")
   end
+  ui.makeSortHeaders(w, host, "Count", "Most first; again for fewest first.", 412)
 end
 
 function bankWindow.after(w, data)
-  local n = ui.drawMaster(w, data.masters or {})
-  w.gold:ClearAllPoints()
-  w.gold:SetPoint("TOPLEFT", w.frame, "TOPLEFT", 12, -4 - n * 21 - 8)
-  w.gold:SetText(w.bank and moneyText(w.bank.money) or "")
+  ui.drawSortHeaders(w, true)
+  ui.drawMaster(w, data.masters or {})
+  if w.altButton then w.altButton.text:SetText(isBankAlt() and ("Bank alt " .. ui.TICK) or "Set bank alt") end
   if w.view then w.view.text:SetText(w.grid and "List" or "Grid") end
   local entry
   for _, e in ipairs(w.items_ or {}) do
@@ -2378,7 +2866,7 @@ function bankWindow.after(w, data)
   local changed = (entry and entry.key) ~= w.pick
   w.pick = entry and entry.key or nil
   if changed then ui.draw(w) end
-  ui.drawDetail(w, bankWindow.describe(w, entry), w.bank and "Pick an item." or "")
+  ui.drawDetail(w, (w.mineShown and bankWindow.describeMine or bankWindow.describe)(w, entry), (w.bank or w.mineShown) and "Pick an item." or "")
 end
 
 -- ---------------------------------------------------------- crafts window --
@@ -2390,7 +2878,7 @@ local function craftsIndex()
   local db = initDB()
   local list, byKey, profs, groups = {}, {}, {}, {}
   local function add(char, c, prof, skill, r, group, own)
-    local key = prof .. "#" .. (r.id and ("s" .. r.id) or r.item and ("i" .. r.item) or ("n" .. str(r.name):lower()))
+    local key = asks.keyOf(prof, r)
     local e = byKey[key]
     if not e then
       e = { key = key, prof = prof, id = r.id, item = r.item, name = r.name, crafters = {}, seen = {} }
@@ -2429,7 +2917,7 @@ local function craftsIndex()
   local profList = {}
   for p in pairs(profs) do profList[#profList + 1] = p end
   table.sort(profList)
-  return list, profList, groups
+  return list, profList, groups, byKey
 end
 
 local function recipeName(e)
@@ -2458,6 +2946,8 @@ craftsWindow.PROFS = {
   Skinning = { 8613, "INV_Misc_Pelt_Wolf_01" }, Fishing = { 7620, "Trade_Fishing" },
 }
 craftsWindow.ALL_ICON = "Interface\\Icons\\INV_Misc_Book_09"
+craftsWindow.REQUEST_ICON = "Interface\\Icons\\INV_Misc_Note_01"
+craftsWindow.MATS_ICON = ui.TICK
 
 function craftsWindow.profIcon(prof)
   local p = craftsWindow.PROFS[prof]
@@ -2513,12 +3003,13 @@ end
 
 function craftsWindow.build(w)
   if not ui.crafts then
-    local list, profs, groups = craftsIndex()
-    ui.crafts = { list = list, profs = profs, groups = groups }
+    local list, profs, groups, byKey = craftsIndex()
+    ui.crafts = { list = list, profs = profs, groups = groups, byKey = byKey }
   end
   ui.loadState(w)
+  if asks.pointed then w.master, w.offset, asks.pointed = asks.REQ, 0, nil end
   local idx = ui.crafts
-  local known, counts = {}, { All = 0 }
+  local known, counts = { [asks.REQ] = true }, { All = 0 }
   for _, p in ipairs(idx.profs) do known[p] = true end
   if w.master and not known[w.master] then w.master = nil end
   local out = { rows = {}, filters = {}, footer = "", empty = "No recipes yet. Open your professions once.", masters = {} }
@@ -2543,18 +3034,16 @@ function craftsWindow.build(w)
       end
     end
   end
-  out.masters[1] = { value = nil, label = "All", count = counts.All, icon = craftsWindow.ALL_ICON }
+  local view = asks.view()
+  out.masters[1] = { value = asks.REQ, label = "Requests", count = #view.forYou, icon = craftsWindow.REQUEST_ICON }
+  out.masters[2] = { value = nil, label = "All", count = counts.All, icon = craftsWindow.ALL_ICON }
   for _, p in ipairs(idx.profs) do
     out.masters[#out.masters + 1] = { value = p, label = p, count = counts[p], icon = craftsWindow.profIcon(p) }
   end
-  local g = ui.group(shown, function(d) return craftsWindow.category(d.e) end)
-  for _, cat in ipairs(g.cats) do
-    local list = g.items[cat]
-    out.rows[#out.rows + 1] = { header = true, cat = cat, count = #list, collapsed = w.collapsed[cat] and true or false }
-    if not w.collapsed[cat] then
-      for _, d in ipairs(list) do out.rows[#out.rows + 1] = d end
-    end
-  end
+  if w.master == asks.REQ then return craftsWindow.requestRows(w, view, out) end
+  ui.arrange(w, shown, function(d) return craftsWindow.category(d.e) end, out, function(list)
+    for _, d in ipairs(list) do out.rows[#out.rows + 1] = d end
+  end)
   w.items_ = shown
   if #idx.list > 0 and #shown == 0 then out.empty = "Nothing matches." end
   local n = 0
@@ -2574,28 +3063,46 @@ end
 craftsWindow.decorate = ui.decorateRow
 
 function craftsWindow.fill(w, row, d)
-  if d.header then return ui.fillHeader(row, d) end
+  if d.header then
+    row.label:SetWidth(w.nameWidth)
+    return ui.fillHeader(row, d)
+  end
   local e = d.e
   row.icon:ClearAllPoints()
   row.icon:SetPoint("LEFT", row, "LEFT", 14, 0)
   row.icon:SetTexture(recipeIcon(e))
+  if d.req then return craftsWindow.fillRequest(w, row, d) end
+  row.label:SetWidth(w.nameWidth)
   row.label:SetText(d.name)
   if e.item then row.label:SetTextColor(itemQualityColor(e.item)) else row.label:SetTextColor(gameColor("HIGHLIGHT")) end
-  row.right:SetText((d.on and ONLINE_ICON or "") .. gameColor(d.on and "HIGHLIGHT" or "GRAY", true) .. #d.who .. "|r")
+  row.right:SetText(ui.levelPrefix(w, d) .. (d.on and ONLINE_ICON or "") .. gameColor(d.on and "HIGHLIGHT" or "GRAY", true) .. #d.who .. "|r")
   if w.pick == e.key then row.sel:Show() else row.sel:Hide() end
+end
+
+-- What a recipe sorts by: its made item's rarity or level, or how many can make it.
+function craftsWindow.sortValue(d, key)
+  if key == "count" then return #d.who end
+  return ui.itemSortValue(d.e.item, key)
 end
 
 function craftsWindow.enter(w, row, d)
   if d.header then return end
+  if d.req then return craftsWindow.enterRequest(row, d) end
   local tt = recipeTooltip(row, d.e.item, d.e.id, d.name)
   if tt then try(tt.Show, tt) end
 end
 
--- A category opens or closes; a recipe shows on the right (shift-click links it).
+-- A category opens or closes; a recipe (or a request) shows on the right (shift-click links it).
 function craftsWindow.click(w, d)
   if d.header then return ui.toggleHeader(w, d) end
   if shiftDown() then
     linkInChat(recipeLink(d.e))
+    return
+  end
+  if d.req then
+    w.reqPick = d.key
+    if w.detail then w.detail.offset = 0 end
+    pcall(ui.render, w)
     return
   end
   ui.setPick(w, d.e.key)
@@ -2626,7 +3133,21 @@ function craftsWindow.describe(w, e)
         text = n .. (num(g.count, 1) > 1 and (gameColor("GRAY", true) .. " x" .. g.count .. "|r") or "") }
     end
   end
-  lines[#lines + 1] = { head = true, text = "Crafters", a = "Lvl", b = "Skill" }
+  -- this character's request for it, if any: its state and Cancel; else Request by the crafters (when someone
+  -- off this account can make it)
+  local id = Sync and Sync.craftRequestId(readName(), e.key)
+  local mine = id and initDB().requests[id]
+  local asked = Sync and Sync.requestActive(mine, time())
+  local others = false
+  for _, c in ipairs(e.crafters) do if not c.own then others = true end end
+  if asked then
+    lines[#lines + 1] = { text = gameColor("GREEN", true) .. "Requested|r" .. (num(mine.qty, 1) > 1 and (" x" .. mine.qty) or ""),
+      button = { label = "Cancel", tip = "Take your request off everyone's list.", onClick = function() asks.set(id, "cancelled") end } }
+    lines[#lines + 1] = { text = mine.claimer and (mine.claimer .. " will make it") or "Waiting for a crafter", color = "GRAY" }
+  end
+  lines[#lines + 1] = { head = true, text = "Crafters", a = "Lvl", b = "Skill",
+    button = (others and not asked) and { label = "Request", tip = "Ask the guild's crafters to make it for you.",
+      onClick = function() craftsWindow.openForm(w, e) end } or nil }
   for _, c in ipairs(craftsWindow.who(e, onlineNames(), ui.crafts and ui.crafts.groups or {})) do
     local color = c.online and classHex(c.class) or gameColor(c.via and "HIGHLIGHT" or "GRAY", true)
     local lvl = craftsWindow.level(c.name)
@@ -2645,30 +3166,202 @@ function craftsWindow.make(w, host)
   w.onlineBox = ui.check(host, 350, -2, "Online", function(on)
     w.onlineOnly, w.offset = on, 0
     pcall(ui.render, w)
-  end, "Only recipes someone online can make.")
+  end, "Only recipes someone online can make (on Requests: whoever asked is online).")
+  ui.makeSortHeaders(w, host, "Crafters", "Most crafters first; again for fewest first.", 418)
+  host:HookScript("OnShow", function() if w.form then w.form:Hide() end end)
 end
 
--- After each redraw: the professions, and the picked recipe (remembered; else the first one shown).
+-- After each redraw: the professions, and the picked recipe (remembered; else the first one shown), or on
+-- Requests the picked request.
 function craftsWindow.after(w, data)
   ui.drawMaster(w, data.masters or {})
+  ui.drawSortHeaders(w, w.master ~= asks.REQ)
   if w.onlineBox then w.onlineBox:SetChecked(w.onlineOnly and true or false) end
-  local entry
+  local field = w.master == asks.REQ and "reqPick" or "pick"
+  local picked
   for _, d in ipairs(w.items_ or {}) do
-    if d.key == w.pick then entry = d.e break end
+    if d.key == w[field] then picked = d break end
   end
-  if not entry then
+  if not picked then
     for _, d in ipairs(data.rows) do
-      if not d.header then entry = d.e break end
+      if not d.header then picked = d break end
     end
   end
-  local changed = (entry and entry.key) ~= w.pick
-  w.pick = entry and entry.key or nil
+  local key = picked and picked.key or nil
+  local changed = key ~= w[field]
+  w[field] = key
   if changed then ui.draw(w) end
-  ui.drawDetail(w, craftsWindow.describe(w, entry), "Pick a recipe.")
+  if w.form and w.form.entry and (field ~= "pick" or w.form.entry.key ~= key) then w.form:Hide() end
+  if field == "reqPick" then
+    ui.drawDetail(w, picked and craftsWindow.describeRequest(w, picked), "No requests now.")
+  else
+    ui.drawDetail(w, craftsWindow.describe(w, picked and picked.e), "Pick a recipe.")
+  end
+end
+
+-- ---------------------------------------------------------- craft requests --
+-- The Requests source at the top of the Crafting tab's left list: what this account's characters can make
+-- (open ones under For you, taken ones under Being made) and its own requests (Yours). Picking one shows it on
+-- the right with what can be done: I'll make it, Whisper, and for the asker Cancel and Done.
+
+-- A request's recipe as a Crafting entry (the index's, else made from the request).
+function craftsWindow.entryFor(r)
+  local byKey = ui.crafts and ui.crafts.byKey or {}
+  return byKey[r.key] or { key = r.key, prof = r.prof, id = r.spell, item = r.item, name = r.name, crafters = {} }
+end
+
+asks.nameOf = function(r) return recipeName(craftsWindow.entryFor(r)) end
+
+function craftsWindow.shortAgo(t)
+  local s = math.max(0, time() - num(t, 0))
+  if s < 3600 then return math.max(1, floor(s / 60)) .. "m" end
+  if s < 86400 then return floor(s / 3600) .. "h" end
+  return floor(s / 86400) .. "d"
+end
+
+craftsWindow.REQUEST_GROUPS = { { "forYou", "For you" }, { "taken", "Being made" }, { "mine", "Yours" } }
+
+function craftsWindow.requestRows(w, view, out)
+  local online, search = onlineNames(), searchText(w)
+  local shown = {}
+  for _, g in ipairs(craftsWindow.REQUEST_GROUPS) do
+    local list = {}
+    for _, x in ipairs(view[g[1]]) do
+      local r, e = x.r, craftsWindow.entryFor(x.r)
+      local name = recipeName(e)
+      local hay = (name .. " " .. r.asker .. " " .. str(r.claimer)):lower()
+      local mine = g[1] == "mine"
+      if (search == "" or hay:find(search, 1, true)) and (not w.onlineOnly or mine or online[r.asker]) then
+        list[#list + 1] = { e = e, req = r, id = x.id, key = "req:" .. x.id, name = name, mine = mine, on = online[r.asker] and true or false }
+      end
+    end
+    if #list > 0 then
+      out.rows[#out.rows + 1] = { header = true, cat = g[2], count = #list, collapsed = w.collapsed[g[2]] and true or false }
+      for _, d in ipairs(list) do
+        if not w.collapsed[g[2]] then out.rows[#out.rows + 1] = d end
+        shown[#shown + 1] = d
+      end
+    end
+  end
+  w.items_ = shown
+  local any = #view.forYou + #view.taken + #view.mine > 0
+  out.empty = any and "Nothing matches." or "No craft requests. Pick a recipe and press Request to ask for one."
+  out.footer = #shown .. (#shown == 1 and " request" or " requests")
+  return out
+end
+
+-- A row: the recipe (x how many, a tick when they have the mats); on the right who asked (online dot, class
+-- colour, how long ago), or who's making it, or for your own, waiting.
+function craftsWindow.fillRequest(w, row, d)
+  local r = d.req
+  row.label:SetWidth(w.nameWidth - 70)
+  row.label:SetText(d.name .. (num(r.qty, 1) > 1 and (gameColor("GRAY", true) .. " x" .. r.qty .. "|r") or "")
+    .. (r.mats and (" " .. craftsWindow.MATS_ICON) or ""))
+  if d.e.item then row.label:SetTextColor(itemQualityColor(d.e.item)) else row.label:SetTextColor(gameColor("HIGHLIGHT")) end
+  local gray = gameColor("GRAY", true)
+  local right
+  if r.state == "claimed" then
+    right = gray .. "by|r " .. (r.claimer == readName() and "you" or str(r.claimer))
+  elseif d.mine then
+    right = gray .. "waiting|r"
+  else
+    right = (d.on and ONLINE_ICON or "") .. classHex(r.class) .. r.asker .. "|r " .. gray .. craftsWindow.shortAgo(r.created) .. "|r"
+  end
+  row.right:SetText(right)
+  if w.reqPick == d.key then row.sel:Show() else row.sel:Hide() end
+end
+
+-- What a request says, for its row's tooltip and the detail: who asked when, how many, mats, who's on it.
+function craftsWindow.requestFacts(r)
+  return {
+    "Asked by " .. classHex(r.class) .. r.asker .. "|r, " .. ago(r.created),
+    num(r.qty, 1) .. (r.mats and ", has the mats" or ", needs the mats"),
+    r.claimer and (r.claimer .. " will make it") or "Nobody on it yet",
+  }
+end
+
+function craftsWindow.enterRequest(row, d)
+  local tt = GameTooltip
+  if not tt then return end
+  try(tt.SetOwner, tt, row, "ANCHOR_RIGHT")
+  try(tt.SetText, tt, d.name)
+  local r, g, b = gameColor("HIGHLIGHT")
+  for _, line in ipairs(craftsWindow.requestFacts(d.req)) do try(tt.AddLine, tt, line, r, g, b, true) end
+  if str(d.req.note) ~= "" then try(tt.AddLine, tt, "\"" .. d.req.note .. "\"", 1, 0.82, 0, true) end
+  try(tt.Show, tt)
+end
+
+-- The picked request on the right.
+function craftsWindow.describeRequest(w, d)
+  local r, e, id = d.req, d.e, d.id
+  local online = onlineNames()
+  local facts = craftsWindow.requestFacts(r)
+  local lines = {}
+  local asker = (online[r.asker] and ONLINE_ICON or "") .. classHex(r.class) .. r.asker .. "|r"
+  lines[#lines + 1] = { text = d.mine and ("Asked by " .. asker) or asker,
+    button = not d.mine and { label = "Whisper", enabled = (online[r.asker] and r.asker ~= readName()) and true or false,
+      tip = not online[r.asker] and "Offline" or nil, onClick = function() whisper(r.asker) end } or nil }
+  lines[#lines + 1] = { text = facts[2] }
+  if str(r.note) ~= "" then lines[#lines + 1] = { text = "\"" .. r.note .. "\"", color = "GRAY" } end
+  if d.mine then
+    lines[#lines + 1] = { text = facts[3], color = r.claimer and "GREEN" or "GRAY",
+      button = { label = "Cancel", tip = "Take it off everyone's list.", onClick = function() asks.set(id, "cancelled") end } }
+    lines[#lines + 1] = { text = "", button = { label = "Done", tip = "You got it: take it off everyone's list.",
+      onClick = function() asks.set(id, "done") end } }
+  elseif r.state == "open" then
+    lines[#lines + 1] = { text = facts[3], color = "GRAY", button = { label = "I'll make it", width = 80,
+      tip = "Tell the guild you'll make it; " .. r.asker .. " gets a line.", onClick = function() asks.set(id, "claimed") end } }
+  else
+    lines[#lines + 1] = { text = r.claimer == readName() and "You'll make it" or facts[3], color = "GREEN" }
+  end
+  return { item = e.item, spell = e.id, icon = recipeIcon(e), name = d.name, link = recipeLink(e),
+    color = e.item and { itemQualityColor(e.item) } or nil, sub = e.prof .. ", " .. craftsWindow.shortAgo(r.created) .. " ago",
+    lines = lines }
+end
+
+-- The little Request form over the detail pane: how many, I have mats, a short note, Send.
+function craftsWindow.openForm(w, e)
+  local p = w.form
+  if not p then
+    p = ui.popup(w.frame, 222, 108)
+    if not p then return end
+    local qty = p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    qty:SetPoint("TOPLEFT", p, "TOPLEFT", 12, -34)
+    qty:SetText("How many")
+    p.qty = ui.inputBox(p, 70, -28, 34, 3, "How many you'd like.", "How many")
+    if p.qty then try(p.qty.SetNumeric, p.qty, true) end
+    p.mats = ui.check(p, 112, -26, "I have mats", function() end, "You'll send or bring the materials.")
+    local note = p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+    note:SetPoint("TOPLEFT", p, "TOPLEFT", 12, -58)
+    note:SetText("Note")
+    p.note = ui.inputBox(p, 48, -52, 162, Sync and Sync.NOTE_MAX or 60, "Optional, a few words: crafters see it on the request.", "Note")
+    local function send()
+      local qtyText = p.qty and try(p.qty.GetText, p.qty)
+      asks.create(p.entry, num(qtyText, 1), p.mats and p.mats:GetChecked(), p.note and try(p.note.GetText, p.note))
+      p:Hide()
+      pcall(ui.render, w)
+    end
+    p.send = ui.button(p, 130, -78, 80, "Send", send, "Ask the guild's crafters who can make it.")
+    for _, box in pairs({ p.qty, p.note }) do
+      box:SetScript("OnEnterPressed", send)
+      box:SetScript("OnEscapePressed", function() p:Hide() end)
+    end
+    w.form = p
+  end
+  p.entry = e
+  p.title:SetText("Request " .. recipeName(e))
+  if p.qty then p.qty:SetText("1") end
+  if p.note then p.note:SetText("") end
+  if p.mats then p.mats:SetChecked(false) end
+  p:ClearAllPoints()
+  p:SetPoint("TOPLEFT", w.frame, "TOPLEFT", w.detail and w.detail.x - 4 or 0, -44)
+  p:Show()
+  if p.qty then try(p.qty.SetFocus, p.qty) try(p.qty.HighlightText, p.qty) end
 end
 
 refreshWindows = function()
   ui.crafts = nil -- the data changed: rebuild the recipe index
+  if asks.badges then pcall(asks.badges) end
   if ui.redrawQueued then return end
   ui.redrawQueued = true
   after(0.5, function()
@@ -2688,7 +3381,10 @@ local function redrawSoon()
   ui.redrawQueued = true
   after(0.3, function()
     ui.redrawQueued = false
-    for _, w in pairs(ui.windows) do pcall(ui.render, w) end
+    for _, w in pairs(ui.windows) do
+      w.keepPick = true -- a newly loaded item may move in the order: keep the picked one in view
+      pcall(ui.render, w)
+    end
   end)
 end
 
@@ -2779,14 +3475,24 @@ end
 function siteView.click() end
 function siteView.isEmpty() return false end
 
--- A one-line box holding text to copy: it selects itself and puts the text back if typed over.
-function ui.copyBox(parent, x, y, width, tip)
+-- The game's one-line input box (InputBoxTemplate), small text; maxLetters and a tooltip (title, text) optional.
+function ui.inputBox(parent, x, y, width, maxLetters, tip, title)
   local e = newFrame("EditBox", nil, parent, "InputBoxTemplate") or newFrame("EditBox", nil, parent)
   if not e then return nil end
   e:SetSize(width, 20)
   e:SetPoint("TOPLEFT", parent, "TOPLEFT", x, y)
   e:SetAutoFocus(false)
   try(e.SetFontObject, e, GameFontHighlightSmall)
+  if maxLetters then try(e.SetMaxLetters, e, maxLetters) end
+  e:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
+  if tip or title then ui.tip(e, title or tip, title and tip or nil) end
+  return e
+end
+
+-- A one-line box holding text to copy: it selects itself and puts the text back if typed over.
+function ui.copyBox(parent, x, y, width, tip)
+  local e = ui.inputBox(parent, x, y, width, nil, tip, "Copy")
+  if not e then return nil end
   e:SetScript("OnTextChanged", function(self, userInput)
     if userInput and self.value and self:GetText() ~= self.value then
       self:SetText(self.value)
@@ -2795,13 +3501,11 @@ function ui.copyBox(parent, x, y, width, tip)
   end)
   e:SetScript("OnEditFocusGained", function(self) try(self.HighlightText, self) end)
   e:SetScript("OnMouseUp", function(self) try(self.HighlightText, self) end)
-  e:SetScript("OnEscapePressed", function(self) self:ClearFocus() end)
   function e.setValue(v)
     e.value = v
     e:SetText(v)
     try(e.SetCursorPosition, e, 0)
   end
-  ui.tip(e, "Copy", tip)
   return e
 end
 
@@ -2855,9 +3559,10 @@ function ui.refreshSite()
 end
 
 -- ------------------------------------------------------------ guild view --
--- Guildmates running the addon, like the game's guild roster: columns to sort by (Name, Role, Class,
--- Level; again reverses, and the pick is remembered), each main with its alts under it. One row of
--- filters: Online, the classes, the roles, and Alts (off lists mains only). Right-click one of your own
+-- The whole guild, like the game's guild roster: everyone on the game's roster, with what guildmates' addons
+-- share (mains and alts, roles, professions) for those who run it. Columns to sort by (Name, Role, Class, Level,
+-- Rank; again reverses, and the pick is remembered), each main with its alts under it. One row of filters:
+-- Online, the classes, the roles, Alts (off lists mains only), and More (the ranks). Right-click one of your own
 -- characters to set its roles.
 
 -- Tank, healer, damage: the group finder's role icons, else a spell icon each.
@@ -2957,8 +3662,9 @@ end
 
 local guildView = { key = "Guild", nameWidth = 300, noFilters = true, filterTop = -58, searchWidth = 150, rightClick = true,
   emptyArt = "Interface\\AddOns\\FantasyForce\\Media\\Logo" }
-guildView.COLUMNS = { { "name", "Name" }, { "role", "Role" }, { "class", "Class" }, { "level", "Level" } }
+guildView.COLUMNS = { { "name", "Name" }, { "role", "Role" }, { "class", "Class" }, { "level", "Level" }, { "rank", "Rank" } }
 guildView.ROLE_RANK = { tank = "1", healer = "2", dps = "3" }
+guildView.STALE = 300 -- the footer says how old the roster is when it's older than this (seconds)
 
 function guildView.sort()
   local st = ui.state()
@@ -2978,6 +3684,7 @@ end
 function guildView.value(c, key)
   if key == "level" then return c.level end
   if key == "class" then return ui.className(c.class) end
+  if key == "rank" then return c.rankIndex end -- the guild's own order: Guild Master first
   if key == "role" then
     local v = ""
     for _, r in ipairs(c.roles) do v = v .. (guildView.ROLE_RANK[r] or "4") end
@@ -3002,6 +3709,7 @@ function guildView.passes(w, c, search)
   if w.onlineOnly and not c.online then return false end
   if not w.showAlts and not c.isMain then return false end
   if next(w.classes) and not w.classes[c.class] then return false end
+  if next(w.ranks) and not w.ranks[c.rankIndex] then return false end
   if next(w.roles) then
     for _, r in ipairs(c.roles) do
       if w.roles[r] then return true end
@@ -3011,26 +3719,90 @@ function guildView.passes(w, c, search)
   return true
 end
 
-function guildView.build(w)
-  local out = { rows = {}, filters = {}, footer = "", empty = "No guildmates with the addon yet." }
-  local index, online, search, own = mainIndex(), onlineNames(), searchText(w), initDB().characters
-  local groups, list = {}, {}
+-- The last roster recorded for this guild (saved, so the tab is full at login before the game sends it anew).
+function guildView.roster()
+  local g = initDB().guild
+  local guild = myGuild()
+  if type(g) ~= "table" or type(g.members) ~= "table" or (guild ~= "" and str(g.name) ~= "" and g.name ~= guild) then return {}, nil end
+  return g.members, num(g.updated, 0)
+end
+
+-- Everyone: the game's roster (rank, level, class, note, last seen) merged by name with what guildmates' addons
+-- share (mains and alts, roles, professions). Someone without the addon is their own main unless their public
+-- note plainly names another member as their main (a guess, marked so).
+function guildView.people()
+  local index, own = mainIndex(), initDB().characters
+  local roster, updated = guildView.roster()
+  local live = num(try(GetNumGuildMembers), 0) > 0
+  local onlineSet = onlineNames()
+  local chars, names = {}, {}
+  local function char(name)
+    local c = chars[name]
+    if not c then
+      c = { name = name, class = "", level = 0, roles = {}, rank = "", rankIndex = 99, note = "" }
+      chars[name] = c
+      names[#names + 1] = name
+    end
+    return c
+  end
+  for _, m in ipairs(roster) do
+    if type(m) == "table" and str(m.name) ~= "" then
+      local c = char(m.name)
+      c.class, c.level, c.rank, c.rankIndex = str(m.class), num(m.level, 0), str(m.rank), num(m.rankIndex, 98)
+      c.note, c.lastOnline, c.inRoster = str(m.note), m.lastOnline, true
+      if live then c.online = onlineSet[m.name] and true or false else c.online = m.online and true or false end
+    end
+  end
   for name, e in pairs(index) do
-    local g = groups[e.main]
+    local c = char(name)
+    local a = type(e.char) == "table" and e.char or {}
+    if c.class == "" then c.class = str(a.class) end
+    if num(a.level, 0) > c.level then c.level = num(a.level, 0) end
+    c.profs, c.roles, c.main, c.addon = a.profs, Sync and Sync.orderRoles(a.roles) or {}, e.main, true
+    if not c.inRoster then c.online = onlineSet[name] and true or false end
+  end
+  local guess = {}
+  for name, c in pairs(chars) do
+    if not c.addon then guess[name] = Sync and Sync.mainFromNote(c.note, names, name) or nil end
+  end
+  for name, c in pairs(chars) do
+    if not c.addon then
+      local m = guess[name]
+      local t = m and chars[m]
+      -- one step on: a note naming someone's alt means that alt's main
+      if t and t.addon then m = t.main elseif t and guess[m] and guess[m] ~= name then m = guess[m] end
+      c.main, c.guess = m or name, m ~= nil and m ~= name or nil
+    end
+    c.isMain, c.own = c.main == name, type(own[name]) == "table"
+    c.extra = rosterLive[name]
+  end
+  return chars, live, updated
+end
+
+function guildView.build(w)
+  local out = { rows = {}, filters = {}, footer = "", empty = "No guild roster yet: it fills in a moment after you log in." }
+  local search = searchText(w)
+  local chars, live, updated = guildView.people()
+  local groups, list = {}, {}
+  w.rankList = {}
+  local seenRank = {}
+  for name, c in pairs(chars) do
+    local g = groups[c.main]
     if not g then
-      g = { main = e.main, chars = {}, online = false }
-      groups[e.main] = g
+      g = { main = c.main, chars = {}, online = false }
+      groups[c.main] = g
       list[#list + 1] = g
     end
-    local c = type(e.char) == "table" and e.char or {}
-    local on = online[name] and true or false
-    local ch = { name = name, class = str(c.class), level = num(c.level, 0), profs = c.profs, online = on,
-      roles = Sync and Sync.orderRoles(c.roles) or {}, isMain = name == e.main, main = e.main, group = g,
-      own = type(own[name]) == "table" }
-    g.chars[#g.chars + 1] = ch
-    if ch.isMain then g.mainChar = ch end
-    if on then g.online = true end
+    c.group = g
+    g.chars[#g.chars + 1] = c
+    if name == c.main then g.mainChar = c end
+    if c.online then g.online = true end
+    if c.inRoster and not seenRank[c.rankIndex] then
+      seenRank[c.rankIndex] = true
+      w.rankList[#w.rankList + 1] = { index = c.rankIndex, name = c.rank }
+    end
   end
+  table.sort(w.rankList, function(a, b) return a.index < b.index end)
   local s = guildView.sort()
   local less = guildView.less(s)
   for _, g in ipairs(list) do
@@ -3039,7 +3811,7 @@ function guildView.build(w)
   end
   table.sort(list, function(a, b) return less(a.mainChar, b.mainChar) end)
   local playing, shown = 0, 0
-  local filtered = search ~= "" or w.onlineOnly or not w.showAlts or next(w.classes) or next(w.roles)
+  local filtered = search ~= "" or w.onlineOnly or not w.showAlts or next(w.classes) or next(w.roles) or next(w.ranks)
   for _, g in ipairs(list) do
     if g.online then playing = playing + 1 end
     local mainShown = guildView.passes(w, g.mainChar, search)
@@ -3063,6 +3835,10 @@ function guildView.build(w)
   else
     out.footer = #list .. (#list == 1 and " player, " or " players, ") .. playing .. " online"
   end
+  -- the saved roster, until the game sends a new one: say how old it is
+  if updated and updated > 0 and time() - updated > guildView.STALE then
+    out.footer = out.footer .. gameColor("GRAY", true) .. "   Updated " .. ago(updated) .. "|r"
+  end
   return out
 end
 
@@ -3075,6 +3851,10 @@ function guildView.decorate(w, row)
     t:SetPoint("LEFT", row, "LEFT", c.name + 6 + (i - 1) * 16, 0)
     row.roleIcons[i] = t
   end
+  -- in the Role column for someone without the addon: why there are no roles
+  row.noAddon = row:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  row.noAddon:SetPoint("LEFT", row, "LEFT", c.name + 6, 0)
+  row.noAddon:SetText("no addon")
   row.class = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
   row.class:SetPoint("LEFT", row, "LEFT", c.name + c.role + 8, 0)
   row.class:SetWidth(c.class - 12)
@@ -3082,6 +3862,11 @@ function guildView.decorate(w, row)
   row.right:ClearAllPoints()
   row.right:SetPoint("LEFT", row, "LEFT", c.name + c.role + c.class + 8, 0)
   row.right:SetJustifyH("LEFT")
+  row.rank = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  row.rank:SetPoint("LEFT", row, "LEFT", c.name + c.role + c.class + c.level + 8, 0)
+  row.rank:SetWidth(c.rank - 12)
+  row.rank:SetJustifyH("LEFT")
+  try(row.rank.SetWordWrap, row.rank, false)
 end
 
 function guildView.fill(w, row, c)
@@ -3101,27 +3886,51 @@ function guildView.fill(w, row, c)
       t:Hide()
     end
   end
-  row.class:SetText(ui.className(c.class))
-  row.class:SetTextColor(gameColor(c.online and "HIGHLIGHT" or "GRAY"))
+  if c.addon then row.noAddon:Hide() else row.noAddon:Show() end
+  local color = c.online and "HIGHLIGHT" or "GRAY"
+  row.class:SetText(c.class ~= "" and ui.className(c.class) or "")
+  row.class:SetTextColor(gameColor(color))
   row.right:SetText(c.level > 0 and tostring(c.level) or "")
-  row.right:SetTextColor(gameColor(c.online and "HIGHLIGHT" or "GRAY"))
+  row.right:SetTextColor(gameColor(color))
+  row.rank:SetText(c.rank)
+  row.rank:SetTextColor(gameColor(color))
+end
+
+-- "today", "3 days ago": the roster counts whole days.
+function guildView.lastSeen(days)
+  days = num(days, -1)
+  if days < 0 then return nil end
+  if days == 0 then return "Last seen today" end
+  if days == 1 then return "Last seen yesterday" end
+  if days >= 60 then return "Last seen " .. floor(days / 30) .. " months ago" end
+  return "Last seen " .. days .. " days ago"
 end
 
 function guildView.enter(w, row, c)
   local tt = GameTooltip
   if not tt then return end
+  local hi, gray = { gameColor("HIGHLIGHT") }, { gameColor("GRAY") }
+  local function line(text, col, wrap) try(tt.AddLine, tt, text, col[1], col[2], col[3], wrap) end
   try(tt.SetOwner, tt, row, "ANCHOR_RIGHT")
   try(tt.SetText, tt, c.name)
-  try(tt.AddLine, tt, c.isMain and "Main" or ("Alt of " .. c.main), gameColor("NORMAL"))
-  if c.level > 0 then try(tt.AddLine, tt, "Level " .. c.level .. " " .. ui.className(c.class), gameColor("HIGHLIGHT")) end
-  if #c.roles > 0 then try(tt.AddLine, tt, ui.roleNames(c.roles), gameColor("HIGHLIGHT")) end
-  local profs = profText(c)
-  if profs ~= "" then
-    local r, g, b = gameColor("HIGHLIGHT")
-    try(tt.AddLine, tt, profs, r, g, b, true)
+  if c.guess then
+    line("Alt of " .. c.main .. " (from their note)", { gameColor("NORMAL") })
+  else
+    line(c.isMain and "Main" or ("Alt of " .. c.main), { gameColor("NORMAL") })
   end
-  if c.online and c.name ~= readName() then try(tt.AddLine, tt, "Click to whisper", gameColor("GRAY")) end
-  if c.own then try(tt.AddLine, tt, "Right-click for roles", gameColor("GRAY")) end
+  if c.level > 0 then line("Level " .. c.level .. " " .. ui.className(c.class), hi) end
+  if c.rank ~= "" then line(c.rank, hi) end
+  local extra = c.extra or {}
+  if c.online and str(extra.zone) ~= "" then line(extra.zone, hi)
+  elseif not c.online and guildView.lastSeen(c.lastOnline) then line(guildView.lastSeen(c.lastOnline), hi) end
+  if c.note ~= "" then line("Note: " .. c.note, hi, true) end
+  if str(extra.officerNote) ~= "" then line("Officer note: " .. extra.officerNote, hi, true) end
+  if #c.roles > 0 then line(ui.roleNames(c.roles), hi) end
+  local profs = c.profs and profText(c) or ""
+  if profs ~= "" then line(profs, hi, true) end
+  if not c.addon then line("No addon: game info only", gray) end
+  if c.online and c.name ~= readName() then line("Click to whisper", gray) end
+  if c.own then line("Right-click for roles", gray) end
   try(tt.Show, tt)
 end
 
@@ -3146,31 +3955,41 @@ function guildView.isEmpty()
   return next(initDB().shared.accounts) == nil
 end
 
--- The roles popup: the character's name and its three role toggles, on a tooltip's backdrop.
+-- A small popup on a tooltip's backdrop: a title (p.title) and the close X. The roles popup and the Request
+-- form are these.
+function ui.popup(parent, width, height)
+  local p = newFrame("Frame", nil, parent, "BackdropTemplate") or newFrame("Frame", nil, parent)
+  if not p then return nil end
+  p:SetSize(width, height)
+  try(p.SetFrameStrata, p, "DIALOG")
+  try(p.EnableMouse, p, true)
+  if p.SetBackdrop then
+    pcall(p.SetBackdrop, p, { bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
+      edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 16,
+      insets = { left = 4, right = 4, top = 4, bottom = 4 } })
+    local bg = TOOLTIP_DEFAULT_BACKGROUND_COLOR
+    if type(bg) == "table" and bg.r then try(p.SetBackdropColor, p, bg.r, bg.g, bg.b, 1) else try(p.SetBackdropColor, p, 0, 0, 0, 1) end
+  end
+  p.title = p:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  p.title:SetPoint("TOPLEFT", p, "TOPLEFT", 10, -9)
+  p.title:SetWidth(width - 34)
+  p.title:SetJustifyH("LEFT")
+  try(p.title.SetWordWrap, p.title, false)
+  local close = newFrame("Button", nil, p, "UIPanelCloseButton")
+  if close then
+    close:SetSize(20, 20)
+    close:SetPoint("TOPRIGHT", p, "TOPRIGHT", 0, 0)
+  end
+  p:Hide()
+  return p
+end
+
+-- The roles popup: the character's name and its three role toggles.
 function guildView.openPopup(w, c)
   local p = w.popup
   if not p then
-    p = newFrame("Frame", nil, w.frame, "BackdropTemplate") or newFrame("Frame", nil, w.frame)
+    p = ui.popup(w.frame, 150, 54)
     if not p then return end
-    p:SetSize(150, 54)
-    try(p.SetFrameStrata, p, "DIALOG")
-    try(p.EnableMouse, p, true)
-    if p.SetBackdrop then
-      pcall(p.SetBackdrop, p, { bgFile = "Interface\\Tooltips\\UI-Tooltip-Background",
-        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border", tile = true, tileSize = 16, edgeSize = 16,
-        insets = { left = 4, right = 4, top = 4, bottom = 4 } })
-      local bg = TOOLTIP_DEFAULT_BACKGROUND_COLOR
-      if type(bg) == "table" and bg.r then try(p.SetBackdropColor, p, bg.r, bg.g, bg.b, 1) else try(p.SetBackdropColor, p, 0, 0, 0, 1) end
-    end
-    p.title = p:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
-    p.title:SetPoint("TOPLEFT", p, "TOPLEFT", 10, -9)
-    p.title:SetWidth(116)
-    p.title:SetJustifyH("LEFT")
-    local close = newFrame("Button", nil, p, "UIPanelCloseButton")
-    if close then
-      close:SetSize(20, 20)
-      close:SetPoint("TOPRIGHT", p, "TOPRIGHT", 0, 0)
-    end
     p.buttons = {}
     for i, role in ipairs(ui.ROLE_ORDER) do
       local b = ui.toggleIcon(p, 22, function(t) ui.roleTexture(t, role) end, ui.ROLES[role].name, nil,
@@ -3224,7 +4043,7 @@ function ui.setRole(name, role, on)
 end
 
 function guildView.make(w, host)
-  w.classes, w.roles, w.showAlts = {}, {}, true
+  w.classes, w.roles, w.ranks, w.showAlts = {}, {}, {}, true
   local function changed()
     w.offset = 0
     pcall(ui.render, w)
@@ -3233,7 +4052,7 @@ function guildView.make(w, host)
     w.onlineOnly = on
     changed()
   end, "Only who's online now.")
-  w.classButtons, w.roleButtons = {}, {}
+  w.classButtons, w.roleButtons, w.rankButtons = {}, {}, {}
   for i, class in ipairs(ui.CLASS_ORDER) do
     local b = ui.toggleIcon(host, 20, function(t) ui.classTexture(t, class) end, ui.className(class), nil, function()
       w.classes[class] = not w.classes[class] or nil
@@ -3258,10 +4077,18 @@ function guildView.make(w, host)
     w.showAlts = on
     changed()
   end, "Off lists mains only.")
+  -- More: a second row with the guild's ranks to filter by (none picked means all)
+  w.moreButton = ui.more(host, 600, -4, function(open)
+    w.moreOpen = open
+    if not open then w.ranks = {} end
+    guildView.layout(w)
+    changed()
+  end)
+  if w.moreButton then ui.tip(w.moreButton, "More", "Filter by rank.") end
   -- the columns: Name takes what the others leave
   local listW = w.width - 30
-  w.cols = { role = 80, class = 150, level = 60 }
-  w.cols.name = listW - w.cols.role - w.cols.class - w.cols.level
+  w.cols = { role = 80, class = 110, level = 50, rank = 120 }
+  w.cols.name = listW - w.cols.role - w.cols.class - w.cols.level - w.cols.rank
   w.nameWidth = w.cols.name - 30
   w.headers = {}
   local x = 6
@@ -3271,9 +4098,52 @@ function guildView.make(w, host)
       guildView.sortBy(key)
       changed()
     end)
+    if w.headers[key] then w.headers[key].x = x end
     x = x + w.cols[key]
   end
+  if w.headers.rank then ui.tip(w.headers.rank, "Rank", "In the guild's rank order; again reverses.") end
   host:HookScript("OnShow", function() if w.popup then w.popup:Hide() end end)
+end
+
+-- With More open the ranks take a row above the column headers, and the list starts lower.
+function guildView.layout(w)
+  local shift = w.moreOpen and 24 or 0
+  w.filterTop = -58 - shift
+  for _, b in pairs(w.headers) do
+    b:ClearAllPoints()
+    b:SetPoint("TOPLEFT", w.frame, "TOPLEFT", b.x or 6, -32 - shift)
+  end
+end
+
+-- The rank buttons (made as the roster's ranks are known), shown while More is open.
+function guildView.drawRanks(w)
+  local x = 6
+  for i, r in ipairs(w.rankList or {}) do
+    local b = w.rankButtons[i]
+    if not b then
+      b = ui.stockButton(w.frame, 20)
+      if b then
+        b:SetScript("OnClick", function(self)
+          w.ranks[self.rankIndex] = not w.ranks[self.rankIndex] or nil
+          w.offset = 0
+          pcall(ui.render, w)
+        end)
+        w.rankButtons[i] = b
+      end
+    end
+    if b then
+      b.rankIndex = r.index
+      b.text:SetText(r.name ~= "" and r.name or ("Rank " .. r.index))
+      local bw = num(try(b.text.GetStringWidth, b.text), 40) + 20
+      b:SetWidth(bw)
+      b:ClearAllPoints()
+      b:SetPoint("TOPLEFT", w.frame, "TOPLEFT", x, -30)
+      ui.styleChoice(b, w.ranks[r.index])
+      if w.moreOpen and x + bw <= w.width then b:Show() else b:Hide() end
+      x = x + bw + 4
+    end
+  end
+  for i = #(w.rankList or {}) + 1, #w.rankButtons do w.rankButtons[i]:Hide() end
 end
 
 function guildView.after(w)
@@ -3285,6 +4155,7 @@ function guildView.after(w)
   for role, b in pairs(w.roleButtons) do ui.setToggle(b, w.roles[role], next(w.roles) ~= nil) end
   if w.onlineBox then w.onlineBox:SetChecked(w.onlineOnly and true or false) end
   if w.altsBox then w.altsBox:SetChecked(w.showAlts and true or false) end
+  guildView.drawRanks(w)
 end
 
 -- --------------------------------------------------------------- commands --
@@ -3368,6 +4239,13 @@ function cmd.bankAlt(on)
   return me .. " is no longer the guild's bank alt."
 end
 
+-- the Bank tab's Set bank alt button (made before cmd)
+function ui.setBankAlt(on)
+  local said = cmd.bankAlt(on)
+  if ui.windows.Bank then pcall(ui.render, ui.windows.Bank) end
+  return said
+end
+
 function cmd.loot(rare)
   local db = initDB()
   db.lootQuality = rare and 3 or 4
@@ -3415,9 +4293,10 @@ function ui.tip(f, title, text)
   if not f or not title then return end
   local function enter(self)
     local tt = GameTooltip
-    if not tt then return end
+    local head = type(title) == "function" and title() or title
+    if not tt or not head then return end -- a title function with nothing to say: no tooltip
     try(tt.SetOwner, tt, self, "ANCHOR_RIGHT")
-    try(tt.SetText, tt, type(title) == "function" and title() or title)
+    try(tt.SetText, tt, head)
     local t = type(text) == "function" and text() or text
     if t then
       local r, g, b = gameColor("HIGHLIGHT")
@@ -3637,13 +4516,16 @@ function panel.makeOptions(page)
 
   heading(-8, "Character")
   o.main = line(16, -32, 200)
+  -- there's no "set alt": every other character on the account is the main's alt
+  o.altsHint = line(16, -44, 200, "GameFontDisableSmall")
+  o.altsHint:SetText("Your other characters are its alts.")
   o.setMain = ui.button(page, 220, -27, 90, "Set main", function() cmd.main() end,
     "Make this character your main in this guild.")
-  o.bankAlt = ui.check(page, 12, -54, "Bank alt", function(on) cmd.bankAlt(on) end,
+  o.bankAlt = ui.check(page, 12, -60, "Bank alt", function(on) cmd.bankAlt(on) end,
     "Share this character's bags and bank as the guild bank.")
-  o.minimap = ui.check(page, 120, -54, "Minimap button", function(on) cmd.minimap(on) end,
+  o.minimap = ui.check(page, 120, -60, "Minimap button", function(on) cmd.minimap(on) end,
     "A round button on the minimap that opens this window.")
-  o.moreCharacter = ui.more(page, 270, -57, function(open) panel.refreshOptions() end)
+  o.moreCharacter = ui.more(page, 270, -63, function(open) panel.refreshOptions() end)
   o.rolesLabel = line(330, -32, 40)
   o.rolesLabel:SetText("Roles")
   o.roles = {}
@@ -3652,9 +4534,9 @@ function panel.makeOptions(page)
       "Guildmates see your roles.", function(self) ui.setRole(readName(), role, not self.on) end)
     if o.roles[role] then o.roles[role]:SetPoint("TOPLEFT", page, "TOPLEFT", 372 + (i - 1) * 28, -27) end
   end
-  o.lootLabel = line(16, -86, 70)
+  o.lootLabel = line(16, -92, 70)
   o.lootLabel:SetText("Raid loot")
-  o.loot = ui.choiceRow(page, 90, -82, { { "rare", "Rare+", "Record rare (blue) raid loot and better." },
+  o.loot = ui.choiceRow(page, 90, -88, { { "rare", "Rare+", "Record rare (blue) raid loot and better." },
     { "epic", "Epic", "Record epic (purple) raid loot and better." } }, function(v) cmd.loot(v == "rare") end)
 
   heading(-120, "Chat")
@@ -3669,6 +4551,10 @@ function panel.makeOptions(page)
     { "thick", "Thick", "More words, and now and then a closing line." } },
     function(v) local A = accentApi() if A then A.setStrength(v) end end)
   o.moreAccent = ui.more(page, 140, -227, function(open) panel.refreshOptions() end)
+  o.enterOpens = ui.check(page, 206, -224, "Enter opens it", function(on)
+    local A = accentApi()
+    if A and A.setEnterOpens then A.setEnterOpens(on) end
+  end, "While an accent is on, Enter opens the accent line. The game's chat box is still on / and Reply.")
   o.preview = line(16, -254, 700, "GameFontDisableSmall")
   o.chats = {}
   for i, c in ipairs(CHAT_LABELS) do
@@ -3722,13 +4608,15 @@ function panel.refreshOptions()
     o.accent.set(c.accent)
     o.strength.set(c.strength)
     o.preview:SetText("\"" .. A.preview() .. "\"")
+    setChecked(o.enterOpens, A.enterOpens and A.enterOpens())
     local moreAccent = o.moreAccent and o.moreAccent.open
     for kind, cb in pairs(o.chats) do
       setChecked(cb, c.chatTypes[kind])
       showIf(cb, moreAccent)
     end
     if c.accent ~= "off" then
-      status = A.canConvert() and "Talk in it: the bubble by your chat tab, or /troll <message>. The game's chat box stays as typed."
+      status = A.canConvert() and ((A.enterOpens and A.enterOpens()) and "Talk in it: press Enter (or the bubble by your chat tab). / and Reply open the game's chat box, as typed."
+        or "Talk in it: the bubble by your chat tab, or /troll <message>. The game's chat box stays as typed.")
         or "Chat can't be changed here: use /troll <message>."
     end
   end
@@ -3796,11 +4684,13 @@ function panel.styleTabs()
 end
 
 function panel.make()
-  local f = ui.makeChrome("Window", "Fantasy Force", panel.W, panel.H)
+  local f = ui.makeChrome("Window", "Fantasy Force", panel.W, panel.H, true)
   if not f then return false end
   panel.frame = f
-  -- the guild's round icon over the top-left corner, like a portrait
-  local badge = newFrame("Frame", nil, f)
+  -- the guild's round icon in the window's portrait, inside the game's gold ring; on a client without the
+  -- portrait window, a badge of our own over the top-left corner instead
+  panel.portrait = f.ffPortrait and ui.setPortrait(f, panel.ICON) or false
+  local badge = not panel.portrait and newFrame("Frame", nil, f) or nil
   if badge then
     badge:SetSize(60, 60)
     badge:SetPoint("TOPLEFT", f, "TOPLEFT", -14, 14)
@@ -3811,7 +4701,7 @@ function panel.make()
     panel.badge = icon
   end
   panel.header = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
-  panel.header:SetPoint("TOPLEFT", f, "TOPLEFT", 54, -32)
+  panel.header:SetPoint("TOPLEFT", f, "TOPLEFT", panel.portrait and 62 or 54, -32)
   panel.accentButton = ui.iconButton(f, "Interface\\ChatFrame\\UI-ChatIcon-Chat-Up", 22, "Accent",
     function()
       local A = accentApi()
@@ -3878,6 +4768,7 @@ function panel.make()
   end
 
   panel.makeTabs(f)
+  pcall(asks.badges)
   f:SetScript("OnShow", function() pcall(panel.refresh) end)
   return true
 end
@@ -3989,9 +4880,35 @@ function ui.makeMinimap()
   b:SetScript("OnClick", function() pcall(panel.toggle, nil) end)
   b:SetScript("OnDragStart", function(self) self:SetScript("OnUpdate", function() pcall(dragMinimap) end) end)
   b:SetScript("OnDragStop", function(self) self:SetScript("OnUpdate", nil) end)
-  ui.tip(b, "Fantasy Force", "Click: open. Drag: move.")
+  ui.tip(b, "Fantasy Force", function()
+    local n = asks.count or 0
+    return "Click: open. Drag: move." .. (n > 0 and ("\n" .. n .. (n == 1 and " craft request" or " craft requests")
+      .. " you can make: Crafting, Requests.") or "")
+  end)
   ui.minimapButton = b
   ui.placeMinimap()
+  pcall(asks.badges)
+end
+
+-- A small count in a button's corner (the game's number font), hidden at 0.
+function ui.badge(f, n, x, y)
+  if not f then return end
+  if not f.ffBadge then
+    f.ffBadge = f:CreateFontString(nil, "OVERLAY", "NumberFontNormalSmall")
+    f.ffBadge:SetPoint("TOPRIGHT", f, "TOPRIGHT", x or 0, y or 0)
+    try(f.ffBadge.SetTextColor, f.ffBadge, gameColor("NORMAL"))
+  end
+  f.ffBadge:SetText(n > 0 and tostring(n) or "")
+  if n > 0 then f.ffBadge:Show() else f.ffBadge:Hide() end
+end
+
+-- How many open craft requests this account can make: on the minimap button and the Crafting tab.
+function asks.badges()
+  asks.count = #asks.view().forYou
+  ui.badge(ui.minimapButton, asks.count, -2, -2)
+  for i, t in ipairs(panel.TABS) do
+    if t.key == "Crafts" then ui.badge(panel.tabs[i], asks.count, -8, -2) end
+  end
 end
 
 -- ----------------------------------------------------------------- events --
@@ -4002,7 +4919,8 @@ if frame then
     "PLAYER_LOGIN", "PLAYER_ENTERING_WORLD", "PLAYER_LEVEL_UP", "SKILL_LINES_CHANGED",
     "PLAYER_TALENT_UPDATE", "ACTIVE_TALENT_GROUP_CHANGED", "CHARACTER_POINTS_CHANGED",
     "PLAYER_GUILD_UPDATE", "GUILD_ROSTER_UPDATE", "PLAYER_LOGOUT",
-    "GUILDBANKFRAME_OPENED", "GUILDBANKBAGSLOTS_CHANGED", "BANKFRAME_OPENED", "BAG_UPDATE_DELAYED",
+    "GUILDBANKFRAME_OPENED", "GUILDBANKBAGSLOTS_CHANGED", "BANKFRAME_OPENED", "BANKFRAME_CLOSED", "BAG_UPDATE_DELAYED",
+    "PLAYERBANKSLOTS_CHANGED", "PLAYERREAGENTBANKSLOTS_CHANGED",
     "ZONE_CHANGED_NEW_AREA", "GROUP_ROSTER_UPDATE", "RAID_ROSTER_UPDATE",
     "ENCOUNTER_END", "BOSS_KILL", "CHAT_MSG_LOOT",
     "CHAT_MSG_ADDON", "GET_ITEM_INFO_RECEIVED", "ITEM_DATA_LOAD_RESULT", "SPELL_DATA_LOAD_RESULT",
@@ -4035,12 +4953,23 @@ if frame then
       elseif event == "GUILDBANKBAGSLOTS_CHANGED" then
         recordGuildBank()
       elseif event == "BANKFRAME_OPENED" then
+        share.bankOpen = true
         recordAltBank(true)
-      elseif event == "BAG_UPDATE_DELAYED" then
+      elseif event == "BANKFRAME_CLOSED" then
+        share.bankOpen = false
+      elseif event == "BAG_UPDATE_DELAYED" or event == "PLAYERBANKSLOTS_CHANGED" or event == "PLAYERREAGENTBANKSLOTS_CHANGED" then
+        -- bags (and the bank while it's open) at most every 10 s, the last change caught by one trailing record
         local now = time()
         if loggedIn and now - lastBagRecord >= 10 then
           lastBagRecord = now
-          recordAltBank(false)
+          recordAltBank(share.bankOpen)
+        elseif loggedIn and not share.bagsQueued then
+          share.bagsQueued = true
+          after(10 - (now - lastBagRecord), function()
+            share.bagsQueued = false
+            lastBagRecord = time()
+            recordAltBank(share.bankOpen)
+          end)
         end
       elseif event == "ZONE_CHANGED_NEW_AREA" or event == "GROUP_ROSTER_UPDATE" or event == "RAID_ROSTER_UPDATE" then
         if loggedIn then snapshotRaid() end
@@ -4155,6 +5084,6 @@ end end
 if type(ns) == "table" then
   ns.try, ns.str, ns.print, ns.after = try, str, print_, after
   ns.printHelp, ns.onSettingChanged = ui.printHelp, ui.changed
-  ns.ff = { ui = ui, panel = panel, cmd = cmd,
+  ns.ff = { ui = ui, panel = panel, cmd = cmd, asks = asks,
     views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView, Site = siteView } }
 end

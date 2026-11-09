@@ -91,6 +91,18 @@ local CLASSES = {
   [6948] = { 15, "Junk" },
 }
 
+-- Required level and item level, as GetItemInfo gives them: [id] = { required, item level }; the rest 0, 0.
+local LEVELS = {
+  [118] = { 1, 5 }, [2459] = { 0, 10 }, [3825] = { 0, 20 }, [13457] = { 48, 58 }, [13452] = { 46, 56 }, [13446] = { 45, 55 },
+  [13444] = { 49, 59 }, [13510] = { 50, 60 }, [12360] = { 0, 55 }, [2862] = { 0, 5 }, [2851] = { 2, 7 }, [2871] = { 0, 25 },
+  [7969] = { 0, 40 }, [12643] = { 0, 55 }, [11604] = { 58, 63 }, [12640] = { 56, 61 }, [12784] = { 58, 63 }, [4238] = { 0, 10 },
+  [14048] = { 0, 55 }, [14046] = { 0, 55 }, [14155] = { 0, 60 }, [14154] = { 57, 62 }, [14152] = { 57, 62 }, [2304] = { 1, 5 },
+  [15564] = { 50, 60 }, [15063] = { 53, 58 }, [15062] = { 55, 60 }, [18251] = { 60, 65 }, [4358] = { 0, 10 }, [10562] = { 0, 47 },
+  [15993] = { 0, 47 }, [10646] = { 0, 50 }, [16022] = { 0, 60 }, [13928] = { 40, 50 }, [13931] = { 45, 55 }, [20452] = { 45, 55 },
+  [12217] = { 35, 45 }, [1251] = { 0, 5 }, [8545] = { 0, 40 }, [14530] = { 0, 58 }, [2840] = { 0, 10 }, [3575] = { 0, 20 },
+  [3860] = { 0, 30 }, [12359] = { 0, 50 },
+}
+
 -- [id] = { name, icon }
 local SPELLS = {
   [2657] = { "Smelt Copper", "inv_ingot_02" },
@@ -187,10 +199,17 @@ local ACCOUNTS = {
     { "Tamsin Wraithe", "PRIEST", "Undead", 33, { { "Tailoring", 160 } }, spec = "Holy" } },
 }
 
--- In the guild, without the addon (the guild list only).
+-- In the guild, without the addon (the guild list only): { name, class, level, online, note, days offline,
+-- officer note, zone }. Some notes say whose alt it is ("alt of X", "X's alt", "main: X"), which the Guild tab guesses from.
 local ROSTER_ONLY = {
-  { "Hobb Quickfingers", "ROGUE", 49 }, { "Liora Skywhisper", "SHAMAN", 42 }, { "Quill Redmane", "WARRIOR", 37 },
-  { "Zug Bramblehoof", "SHAMAN", 60 }, { "Krenn Saltfang", "MAGE", 45, true }, { "Nyx Thistlewhip", "WARLOCK", 33 },
+  { "Hobb Quickfingers", "ROGUE", 49, false, "PvP mostly", 2 },
+  { "Liora Skywhisper", "SHAMAN", 42, false, "Zug's alt", 1 },
+  { "Quill Redmane", "WARRIOR", 37, false, "main: Zug", 4, "Asked about tanking" },
+  { "Zug Bramblehoof", "SHAMAN", 60, true, "Resto, MC Thursdays", 0, "Trial ends 20 Nov", "Molten Core" },
+  { "Krenn Saltfang", "MAGE", 45, true, "", 0, nil, "Tanaris" },
+  { "Nyx Thistlewhip", "WARLOCK", 33, false, "alt of Hobb", 6 },
+  { "Rurik Ashenmaul", "WARRIOR", 60, false, "back after the holidays", 143, "Kept on the list, ask before removing" },
+  { "Tova Brightwool", "PRIEST", 18, false, "Pip alt", 3 },
 }
 
 -- The player's own account: the main the preview logs in as, and two alts (one with recipes not recorded yet).
@@ -228,7 +247,9 @@ return function(now)
   local W = { guild = GUILD, items = {}, spells = {}, accounts = {}, own = {}, roster = {} }
   for id, it in pairs(ITEMS) do
     local class = CLASSES[id] or { 7, "Trade Goods" }
-    W.items[id] = { name = it[1], quality = it[2], icon = "Interface\\Icons\\" .. it[3], classID = class[1], sub = class[2] }
+    local lv = LEVELS[id] or { 0, 0 }
+    W.items[id] = { name = it[1], quality = it[2], icon = "Interface\\Icons\\" .. it[3], classID = class[1], sub = class[2],
+      level = lv[1], ilvl = lv[2] }
   end
   for id, s in pairs(SPELLS) do W.spells[id] = { name = s[1], icon = "Interface\\Icons\\" .. s[2] } end
 
@@ -244,7 +265,8 @@ return function(now)
     W.accounts[i] = a
   end
   for _, m in ipairs(ROSTER_ONLY) do
-    W.roster[#W.roster + 1] = { name = m[1], class = m[2], level = m[3], online = m[4] and true or false, rank = "Member", rankIndex = 3 }
+    W.roster[#W.roster + 1] = { name = m[1], class = m[2], level = m[3], online = m[4] and true or false, rank = "Member", rankIndex = 3,
+      note = m[5], lastOnline = m[6], officerNote = m[7], zone = m[8] }
   end
   for i, c in ipairs(OWN) do
     W.own[c[1]] = record(c, now, i == 1 and 0 or i * 86400)
@@ -274,6 +296,29 @@ return function(now)
     raid(now, 12, 6, { { 16800, "Arcanist Boots", 0 }, { 16862, "Sabatons of Might", 2 } }, here),
     raid(now, 9, 8, { { 16796, "Arcanist Leggings", 1 }, { 16849, "Giantstalker's Boots", 2 }, { 16837, "Earthfury Boots", 4 } }, here),
     raid(now, 5, 10, { { 16805, "Felheart Gloves", 0 }, { 16829, "Cenarion Boots", 2 }, { 19147, "Ring of Spell Power", 8 } }, here),
+  }
+
+  -- the player's own characters' bags and banks (Bank tab, Mine): private to this account. Kettle Duskhoof
+  -- has never opened a bank.
+  W.personal = {
+    ["Kettle Brewgut"] = { class = "HUNTER", bagsAt = now - 60, bankAt = now - 2 * 86400,
+      bags = { it(15993, 4), it(10562, 12), it(12359, 20), it(13446, 5), it(6948, 1) },
+      bank = { it(15993, 10), it(12359, 60), it(14047, 40), it(7078, 3), it(13444, 8) } },
+    ["Kettle Emberbrew"] = { class = "SHAMAN", bagsAt = now - 3 * 86400, bankAt = now - 3 * 86400,
+      bags = { it(15993, 2), it(13446, 3), it(13457, 6) },
+      bank = { it(13444, 2), it(12359, 15), it(13468, 1), it(14344, 2) } },
+    ["Kettle Duskhoof"] = { class = "DRUID", bagsAt = now - 5 * 86400,
+      bags = { it(12359, 4), it(14047, 12), it(6948, 1) } },
+  }
+
+  -- craft requests: two Kettle can make (Engineering), and one Kettle asked for that Pip has taken
+  W.requests = {
+    { asker = "Orla Tidesong", class = "SHAMAN", prof = "Engineering", key = "Engineering#i15993", item = 15993, qty = 10, mats = true,
+      note = "For Ragnaros. I have the Thorium!", state = "open", created = now - 2 * 3600, sender = "Orla Tidesong" },
+    { asker = "Pip Ashwhistle", class = "MAGE", prof = "Engineering", key = "Engineering#i10562", item = 10562, qty = 5, mats = false,
+      note = "", state = "open", created = now - 25 * 60, sender = "Pip Ashwhistle" },
+    { asker = "Kettle Brewgut", class = "HUNTER", prof = "Tailoring", key = "Tailoring#i14152", item = 14152, qty = 1, mats = true,
+      note = "Mooncloth's in the bank", state = "claimed", claimer = "Pip Ashwhistle", created = now - 26 * 3600, sender = "Pip Ashwhistle" },
   }
 
   -- a few lines already in guild chat when the preview starts (alts get their main in front)
