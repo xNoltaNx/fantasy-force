@@ -315,6 +315,8 @@
         const inp = el.input;
         inp.style.font = fontCss(n.font);
         if (inp.value !== n.txt) inp.value = n.txt;
+        // SetFocus in the addon puts the caret in the box, as in the game
+        if (n.foc && document.activeElement !== inp) setTimeout(() => { if (inp.isConnected && document.activeElement !== inp) inp.focus(); }, 0);
         if (n.sela && document.activeElement === inp) inp.select();
       }
     } else if (n.t === 'S') {

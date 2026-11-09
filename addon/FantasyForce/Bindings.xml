@@ -1,0 +1,5 @@
+<Bindings>
+  <Binding name="FANTASYFORCE_ACCENTLINE" header="FANTASYFORCE" category="ADDONS">
+    FantasyForce_OpenAccentLine()
+  </Binding>
+</Bindings>

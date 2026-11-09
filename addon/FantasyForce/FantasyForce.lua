@@ -1384,17 +1384,20 @@ local function spellLink(id)
   if type(link) == "string" then return link end
 end
 
-local function openChat(text)
-  try((ChatFrameUtil and ChatFrameUtil.OpenChat) or ChatFrame_OpenChat, text)
+-- Whispers and links go to the addon's own chat line (AccentChat.lua), never into the game's chat box:
+-- an addon writing to the game's chat box can get the game's own chat blocked and blamed on it.
+local function chatLine(chatType, target, text)
+  local A = type(ns) == "table" and ns.AccentChat
+  if A and A.openLine then pcall(A.openLine, chatType, target, text) end
 end
 
 local function linkInChat(link)
-  if type(link) ~= "string" then return end
-  if not try((ChatFrameUtil and ChatFrameUtil.InsertLink) or ChatEdit_InsertLink, link) then openChat(link) end
+  local A = type(ns) == "table" and ns.AccentChat
+  if type(link) == "string" and A and A.insertLink then pcall(A.insertLink, link) end
 end
 
 local function whisper(name)
-  if type(name) == "string" and name ~= "" then openChat("/w " .. name .. " ") end
+  if type(name) == "string" and name ~= "" then chatLine("WHISPER", name, "") end
 end
 
 local function shiftDown()
@@ -1649,7 +1652,21 @@ function ui.makeChrome(key, title, width, height)
   else
     f:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
   end
-  if type(UISpecialFrames) == "table" then table.insert(UISpecialFrames, f:GetName() or name) end
+  -- Escape closes it: the window takes that one key itself (adding it to the game's UISpecialFrames list
+  -- would write into a table the game's own code reads). Other keys go on to the game; in combat the
+  -- game won't let it keep a key, so Escape closes it and goes on too.
+  try(f.EnableKeyboard, f, true)
+  try(f.SetPropagateKeyboardInput, f, true)
+  f:SetScript("OnKeyDown", function(self, key)
+    local fight = try(InCombatLockdown) and true or false
+    if key == "ESCAPE" then
+      if not fight then try(self.SetPropagateKeyboardInput, self, false) end
+      self:Hide()
+      if not fight then after(0, function() try(self.SetPropagateKeyboardInput, self, true) end) end
+    elseif not fight then
+      try(self.SetPropagateKeyboardInput, self, true)
+    end
+  end)
   -- the template's own title when it has one, else the game's large gold font in the title bar
   local t = f.TitleText
   if not (t and t.SetText) then
@@ -2284,9 +2301,9 @@ function bankWindow.keeper(bank)
   return str(bank.by)
 end
 
--- The prefilled whisper: "/w Fantasy Bankalt Hi! Could I have [Runecloth] x1?"
-function bankWindow.askText(bank, id, name)
-  return "/w " .. bankWindow.keeper(bank) .. " Hi! Could I have " .. (itemLink(id) or ("[" .. str(name) .. "]")) .. " x1?"
+-- The prefilled whisper to the keeper: "Hi! Could I have [Runecloth] x1?"
+function bankWindow.askText(id, name)
+  return "Hi! Could I have " .. (itemLink(id) or ("[" .. str(name) .. "]")) .. " x1?"
 end
 
 -- The picked item on the right.
@@ -2321,7 +2338,7 @@ function bankWindow.describe(w, e)
   end
   local keeper = bankWindow.keeper(bank)
   lines[#lines + 1] = { text = keeper, color = "GRAY", button = { label = "Ask", enabled = keeper ~= "" and keeper ~= readName(),
-    tip = "Whispers " .. keeper .. " for one.", onClick = function() openChat(bankWindow.askText(bank, e.id, e.name)) end } }
+    tip = "Whispers " .. keeper .. " for one.", onClick = function() chatLine("WHISPER", keeper, bankWindow.askText(e.id, e.name)) end } }
   return { item = e.id, icon = itemIcon(e.id), name = e.name, color = { itemQualityColor(e.id) }, link = itemLink(e.id),
     sub = ui.category(e.id, e.name), lines = lines }
 end
@@ -3294,6 +3311,7 @@ local COMMANDS = {
   { "/accent light | thick", "How strong" },
   { "/accent chat <type> on | off", "Which chats it changes" },
   { "/accent status", "Your accent, in chat" },
+  { "/accent debug", "What's in, what the game blocked" },
   { "/accent help", "Accent commands in chat" },
   { "/troll", "Troll on or off" },
   { "/troll <message>", "Say one thing in troll" },
@@ -3709,7 +3727,10 @@ function panel.refreshOptions()
       setChecked(cb, c.chatTypes[kind])
       showIf(cb, moreAccent)
     end
-    if c.accent ~= "off" and not A.canConvert() then status = "Chat can't be changed here: use /troll <message>." end
+    if c.accent ~= "off" then
+      status = A.canConvert() and "Talk in it: the bubble by your chat tab, or /troll <message>. The game's chat box stays as typed."
+        or "Chat can't be changed here: use /troll <message>."
+    end
   end
   o.status:SetText(status)
 end
@@ -4089,9 +4110,11 @@ end
 local TAB_COMMANDS = { bank = "Bank", crafts = "Crafts", craft = "Crafts", crafting = "Crafts", guild = "Guild",
   site = "Site", website = "Site", options = "Options" }
 
+-- Registered the standard way: our own SLASH_ name and one new key in the game's SlashCmdList. Never assign
+-- the SlashCmdList global itself (SlashCmdList = SlashCmdList or {}): that taints every read of it by the
+-- game's chat box, and the game then blocks its own slash commands and blames this addon.
 SLASH_FANTASYFORCE1 = "/ff"
-SlashCmdList = SlashCmdList or {}
-SlashCmdList["FANTASYFORCE"] = function(msg)
+if type(SlashCmdList) == "table" then SlashCmdList["FANTASYFORCE"] = function(msg)
   local ok = pcall(function()
     msg = str(msg):lower():gsub("^%s+", ""):gsub("%s+$", "")
     if msg == "" then
@@ -4126,7 +4149,7 @@ SlashCmdList["FANTASYFORCE"] = function(msg)
     end
   end)
   if not ok then print_("something went wrong.") end
-end
+end end
 
 -- For AccentChat.lua (loaded after this file) and the tests.
 if type(ns) == "table" then

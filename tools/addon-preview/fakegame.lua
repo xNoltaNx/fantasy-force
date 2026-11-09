@@ -16,7 +16,13 @@
 --   openChat(text), insertLink(link), reload(), cursor() -> x, y, measure(text, font, wrapWidth, spacing) -> w, h,
 --   screen = { w, h }, minimap = { x, y, size } (its centre from the screen's top right), pcall,
 --   noParse (no chat box hook to post-hook), noSendChat (no SendChatMessage),
---   missingTemplates = { [templateName] = true } (a client without them: CreateFrame errors, as the game does).
+--   missingTemplates = { [templateName] = true } (a client without them: CreateFrame errors, as the game does),
+--   chat = "global" (the chat box parses through the global ChatEdit_ParseText; the default), "mixin" (the box's
+--   own ParseText method; the global is there but never called) or "send" (no parse step to hook: noParse).
+-- Taint, as newer clients judge it: the addon writing over one of the game's globals, writing a field onto a
+-- game frame, hooking the game's chat box path, putting text in the game's chat box, replacing a game function
+-- or adding to UISpecialFrames is recorded (client.taint, FakeGame.tainted); the game then blocks its own
+-- chat box (typeInChat fires ADDON_ACTION_BLOCKED naming the addon and sends nothing), as the real one did.
 -- items may also say classID, subclassID, type and sub (GetItemInfoInstant); tradeskill recipes may say
 -- reagents = { { id, count } }.
 -- Frames keep their state in underscore fields (_text, _shown, _checked, _scripts, _lines, _points ...), which
@@ -106,6 +112,31 @@ function FakeGame.newClient(o)
   end }
   local env -- the addon's globals, below
 
+  -- Is the code n levels up the stack the addon's own (one of its files)?
+  local ADDON_FILES = { ["@Sync.lua"] = true, ["@Accent.lua"] = true, ["@FantasyForce.lua"] = true, ["@AccentChat.lua"] = true }
+  client.taint = {}
+  local function fromAddon(level)
+    for l = level + 1, level + 3 do
+      local info = debug.getinfo(l, "S")
+      if not info then return false end
+      if ADDON_FILES[info.source] then return true end
+      if info.source ~= "=[C]" then return false end
+    end
+    return false
+  end
+  client.fromAddon = fromAddon
+  local function taint(what) client.taint[#client.taint + 1] = what end
+  -- the game's own frames: a field the addon writes onto one taints it
+  local gameMt = { __index = mt.__index, __newindex = function(t, k, v)
+    if type(k) == "string" and k:sub(1, 1) ~= "_" and fromAddon(2) then taint("a field (" .. k .. ") on " .. tostring(rawget(t, "_name") or "a game frame")) end
+    rawset(t, k, v)
+  end }
+  local function gameFrame(f, chatBox)
+    setmetatable(f, gameMt)
+    if chatBox then rawset(f, "_chatBox", true) end
+    return f
+  end
+
   local function mock(kind, fname, parent, layer, sublevel)
     client.nextId = client.nextId + 1
     local f = setmetatable({ _kind = kind, _name = fname, _parent = parent, _scripts = {}, _shown = true, _text = "",
@@ -157,6 +188,7 @@ function FakeGame.newClient(o)
       f._textColor = r and { r, g, b } or nil
       return
     end
+    if rawget(f, "_chatBox") and fromAddon(2) then taint("text put in the game's chat box") end
     f._text = t
     local fs = rawget(f, "Text")
     if fs and fs ~= f and (f._kind == "Button" or f._kind == "CheckButton") then fs:SetText(t) end
@@ -328,6 +360,12 @@ function FakeGame.newClient(o)
     if f._scripts.OnEditFocusLost then f._scripts.OnEditFocusLost(f) end
   end
   function Frame.HasFocus(f) return client.focus == f end
+  function Frame.EnableKeyboard(f, on) f._keyboard = on and true or false end
+  function Frame.SetPropagateKeyboardInput(f, on)
+    if client.combat and fromAddon(2) then error("SetPropagateKeyboardInput is blocked in combat", 2) end
+    f._propagate = on and true or false
+  end
+  function Frame.Insert(f, text) f:SetText((f._text or "") .. tostring(text or "")) end
   function Frame.HighlightText(f) f._highlighted = true end
   function Frame.SetCursorPosition(f, p) f._cursor = p end
   function Frame.SetMaxLetters(f, n) f._maxLetters = n end
@@ -476,7 +514,21 @@ function FakeGame.newClient(o)
   end
 
   -- ---------------------------------------------------------------- env --
-  env = setmetatable({}, { __index = _G })
+  local store = {}
+  local function own(k)
+    return type(k) == "string" and (k:match("^FantasyForce") or k:match("^SLASH_FANTASYFORCE") or k:match("^BINDING_%u+_FANTASYFORCE")) and true or false
+  end
+  env = setmetatable({}, {
+    __index = function(_, k)
+      local v = store[k]
+      if v == nil then v = _G[k] end
+      return v
+    end,
+    __newindex = function(_, k, v)
+      if store[k] ~= nil and not own(k) and fromAddon(2) then taint("the game's global " .. tostring(k)) end
+      store[k] = v
+    end,
+  })
   client.env = env
   env._G = env
   env.pcall = o.pcall or pcall
@@ -502,17 +554,17 @@ function FakeGame.newClient(o)
     return f
   end
 
-  env.UIParent = mock("Frame", "UIParent")
+  env.UIParent = gameFrame(mock("Frame", "UIParent"))
   client.root = env.UIParent
   env.UIParent._strata = "MEDIUM"
   env.UIParent._level = 0
   local mm = o.minimap or { x = 96, y = 112, size = 140 }
-  env.Minimap = mock("Frame", "Minimap", env.UIParent)
+  env.Minimap = gameFrame(mock("Frame", "Minimap", env.UIParent))
   env.Minimap:SetSize(mm.size, mm.size)
   env.Minimap:SetPoint("CENTER", env.UIParent, "TOPRIGHT", -mm.x, -mm.y)
   env.Minimap._strata, env.Minimap._level = "LOW", 2
   env.UISpecialFrames = {}
-  client.tooltip = mock("GameTooltip", "GameTooltip", env.UIParent)
+  client.tooltip = gameFrame(mock("GameTooltip", "GameTooltip", env.UIParent))
   client.tooltip._shown = false
   client.tooltip._strata = "TOOLTIP"
   env.GameTooltip = client.tooltip
@@ -521,6 +573,21 @@ function FakeGame.newClient(o)
     if o.onChat then o.onChat(m, r, g, b) end
   end }
   env.SlashCmdList = {}
+  env.InCombatLockdown = function() return client.combat and true or false end
+  env.NUM_CHAT_WINDOWS = 1
+  env.ChatTypeInfo = { SAY = { r = 1, g = 1, b = 1 }, YELL = { r = 1, g = 0.25, b = 0.25 }, GUILD = { r = 0.25, g = 1, b = 0.25 },
+    OFFICER = { r = 0.25, g = 0.75, b = 0.25 }, PARTY = { r = 0.67, g = 0.67, b = 1 }, RAID = { r = 1, g = 0.5, b = 0 },
+    WHISPER = { r = 1, g = 0.5, b = 1 }, CHANNEL = { r = 1, g = 0.75, b = 0.75 } }
+  -- the first chat window, where the preview draws its chat log, and its tab
+  env.ChatFrame1 = gameFrame(mock("Frame", "ChatFrame1", env.UIParent))
+  env.ChatFrame1:SetSize(440, 190)
+  env.ChatFrame1:SetPoint("BOTTOMLEFT", env.UIParent, "BOTTOMLEFT", 18, 64)
+  env.ChatFrame1Tab = gameFrame(mock("Button", "ChatFrame1Tab", env.UIParent))
+  env.ChatFrame1Tab:SetSize(64, 20)
+  env.ChatFrame1Tab:SetPoint("BOTTOMLEFT", env.ChatFrame1, "TOPLEFT", 0, 2)
+  local tabText = env.ChatFrame1Tab:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  tabText:SetPoint("CENTER", env.ChatFrame1Tab, "CENTER", 0, 0)
+  tabText:SetText("General")
   env.GetCursorPosition = function()
     if o.cursor then return o.cursor() end
     return 100, 300
@@ -696,9 +763,15 @@ function FakeGame.newClient(o)
   env.ChatFrame_AddMessageEventFilter = function(ev, fn) client.filters[ev] = fn end
   env.Enum = { TooltipDataType = { Unit = 2 } }
   env.TooltipDataProcessor = { AddTooltipPostCall = function(kind, fn) if kind == 2 then client.ttPost = fn end end }
+  client.hooks = {}
   env.hooksecurefunc = function(a, b, c)
     local tbl, key, fn
     if type(a) == "string" then tbl, key, fn = env, a, b else tbl, key, fn = a, b, c end
+    client.hooks[#client.hooks + 1] = key
+    if fromAddon(2) and (key == "ParseText" or tostring(key):match("^ChatEdit_") or tbl == env.ChatFrameUtil
+      or (type(tbl) == "table" and rawget(tbl, "_chatBox"))) then
+      taint("a hook on the chat box (" .. tostring(key) .. ")")
+    end
     local orig = tbl[key]
     tbl[key] = function(...)
       local r = table.pack(orig(...))
@@ -707,24 +780,30 @@ function FakeGame.newClient(o)
     end
   end
   -- the chat box's parse: slash commands run (and empty the box) when Enter is pressed
-  if not o.noParse then
-    env.ChatEdit_ParseText = function(box, send)
-      if send == 1 and type(box) == "table" and FakeGame.runSlash(client, box._text or "", box) then box._text = "" end
-    end
+  local function parse(box, send)
+    if send == 1 and type(box) == "table" and FakeGame.runSlash(client, box._text or "", box) then box._text = "" end
   end
+  local chatKind = o.noParse and "send" or o.chat or "global"
+  client.chatKind = chatKind
+  if chatKind ~= "send" then env.ChatEdit_ParseText = parse end
   env.SendMailFrame = mock("Frame", "SendMailFrame")
   env.SendMailBodyEditBox = mock("EditBox", "SendMailBodyEditBox")
   env.SendMailSubjectEditBox = mock("EditBox", "SendMailSubjectEditBox")
   env.SendMailScrollFrame = mock("Frame", "SendMailScrollFrame")
   client.editBox = function(text, chatType, attrs)
-    local e = mock("EditBox")
+    local e = gameFrame(mock("EditBox"), true)
     e._text = text
     e._attrs = attrs or {}
     e._attrs.chatType = chatType
     return e
   end
   client.chatBox = client.editBox("", "SAY")
+  client.chatBox._name = "ChatFrame1EditBox"
+  env.ChatFrame1EditBox = client.chatBox
+  if chatKind == "mixin" then rawset(client.chatBox, "ParseText", function(self, send) parse(self, send) end) end
 
+  client.gameFns = { ["C_ChatInfo.SendChatMessage"] = env.C_ChatInfo.SendChatMessage, SendChatMessage = env.SendChatMessage,
+    ChatEdit_ParseText = env.ChatEdit_ParseText, ["ChatFrame1EditBox:ParseText"] = rawget(client.chatBox, "ParseText") }
   local ns = {}
   for _, s in ipairs(o.sources or {}) do
     assert(load(s.src, "@" .. s.name, "t", env))("FantasyForce", ns)
@@ -850,6 +929,15 @@ end
 -- Escape: the game hides the shown frames named in UISpecialFrames.
 function FakeGame.pressEscape(client)
   local closed = false
+  -- a shown frame taking keys (OnKeyDown) gets Escape first; one that stops it propagating keeps it
+  for id = client.nextId, 1, -1 do
+    local f = client.frames[id]
+    if f and f._keyboard and f._scripts.OnKeyDown and f:IsVisible() then
+      f._scripts.OnKeyDown(f, "ESCAPE")
+      closed = true
+      if f._propagate == false then return true end
+    end
+  end
   for _, n in ipairs(client.env.UISpecialFrames) do
     local f = client.env[n]
     if type(f) == "table" and f.IsShown and f:IsShown() then
@@ -884,23 +972,44 @@ local CHAT_SWITCH = { ["/s"] = "SAY", ["/say"] = "SAY", ["/y"] = "YELL", ["/yell
   ["/ra"] = "RAID", ["/raid"] = "RAID", ["/w"] = "WHISPER", ["/whisper"] = "WHISPER", ["/t"] = "WHISPER", ["/tell"] = "WHISPER" }
 FakeGame.CHAT_SWITCH = CHAT_SWITCH
 
+-- Everything the addon has done that taints the game's chat box (empty when clean).
+function FakeGame.tainted(client)
+  local env, out = client.env, {}
+  for _, t in ipairs(client.taint) do out[#out + 1] = t end
+  local now = { ["C_ChatInfo.SendChatMessage"] = env.C_ChatInfo and env.C_ChatInfo.SendChatMessage, SendChatMessage = env.SendChatMessage,
+    ChatEdit_ParseText = env.ChatEdit_ParseText, ["ChatFrame1EditBox:ParseText"] = rawget(client.chatBox, "ParseText") }
+  for k, fn in pairs(client.gameFns) do
+    if now[k] ~= fn then out[#out + 1] = "the game's " .. k .. " replaced" end
+  end
+  if #env.UISpecialFrames > 0 then out[#out + 1] = "UISpecialFrames written to" end
+  return out
+end
+
 -- Pressing Enter in the chat box: a chat switch (/g, /w Name) changes where it goes, a slash command runs,
 -- the box's text is parsed (the addon's post-hook may rewrite it) and what's left is sent. Returns the
 -- chat type and whisper target the box is left on.
 function FakeGame.typeInChat(client, text, chatType, target)
   local env = client.env
+  -- a tainted chat box: the game blocks its own chat and slash commands and blames the addon
+  local tainted = FakeGame.tainted(client)
+  if #tainted > 0 then
+    client.blockedPopup = tainted
+    client.fire("ADDON_ACTION_BLOCKED", "FantasyForce", tostring(text):match("^/") and "ChatEdit_ParseText()" or "SendChatMessage()")
+    return chatType, target
+  end
   local word, rest = tostring(text):match("^(/%S+)%s*(.*)$")
   if word and CHAT_SWITCH[word:lower()] then
     chatType = CHAT_SWITCH[word:lower()]
     if chatType == "WHISPER" then target, rest = rest:match("^(%S+)%s*(.*)$") end
     text = rest or ""
-  elseif word and not env.ChatEdit_ParseText then
+  elseif word and client.chatKind == "send" then
     if FakeGame.runSlash(client, text, client.chatBox) then return chatType, target end
   end
   local box = client.chatBox
   box._text = text
   box._attrs = { chatType = chatType, tellTarget = target }
-  if type(env.ChatEdit_ParseText) == "function" then env.ChatEdit_ParseText(box, 1) end
+  if client.chatKind == "mixin" then box:ParseText(1)
+  elseif type(env.ChatEdit_ParseText) == "function" then env.ChatEdit_ParseText(box, 1) end
   local out = box._text or ""
   if out ~= "" and not out:match("^/") then
     local send = (env.C_ChatInfo and env.C_ChatInfo.SendChatMessage) or env.SendChatMessage

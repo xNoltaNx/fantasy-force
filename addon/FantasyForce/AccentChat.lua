@@ -1,14 +1,15 @@
--- FantasyForce Accent, game side: chat you type is rewritten in your accent (Accent.lua) before it's
--- sent, and the mail window gets an Accent button. Settings are per character (FantasyForceCharDB).
--- /accent auto|troll|orc|tauren|undead|skyborne|off, /accent light|thick, /accent chat <TYPE> on|off,
--- /troll (troll on or off), /troll <message> (one message in troll to the current chat).
+-- FantasyForce Accent, game side: what you say on the accent's own chat line (and with /troll) goes out in
+-- your accent (Accent.lua), and the mail window gets an Accent button. Settings are per character
+-- (FantasyForceCharDB). /accent auto|troll|orc|tauren|undead|skyborne|off, /accent light|thick,
+-- /accent chat <TYPE> on|off, /accent debug, /troll (troll on or off), /troll <message> (one message in troll).
 --
--- How typed chat is caught, in order of preference:
---   1. a hook after the chat box reads what you typed (ChatEdit_ParseText): the box's text is
---      rewritten just before the game sends it, and the game's own send code runs untouched;
---   2. else a wrapper around SendChatMessage (C_ChatInfo.SendChatMessage or the old global).
--- If neither is possible, or the game blocks the wrapper, /troll <message> still works and one line
--- says so, once.
+-- The game's own chat box is never touched: no hooks on it, nothing written to it, no game function
+-- replaced. On newer game versions any of those can taint the chat box, and the game then blocks its own
+-- chat and slash commands and blames this addon ("FantasyForce has been blocked from an action only
+-- available to the Blizzard UI"). Instead the accent has its own chat line, an edit box of ours docked
+-- where the chat box sits: opened by the speech bubble by the chat tab, by a key (Key Bindings > Fantasy
+-- Force), and by the addon's Whisper and Ask buttons. Enter sends it with SendChatMessage, the same
+-- call /troll makes, on the chat the game's box is on (or a /s, /g, /w Name typed at its start).
 
 local _, ns = ...
 if type(ns) ~= "table" or not ns.Accent or not ns.try then return end
@@ -19,8 +20,11 @@ local DEFAULT_TYPES = { SAY = true, YELL = true, GUILD = true, OFFICER = true, P
 local CHAT_LIMIT = 255
 local UNDO_SECONDS = 10
 
-local hooks = { mode = nil, inSend = false, blocked = false, told = false }
+-- mode: "line" once the accent line is made ("none" if this game can't make one); blocked: the game
+-- blocked something of ours (blockedWhat names it); debug: /accent debug reports the next line sent.
+local hooks = { mode = nil, inSend = false, blocked = false, blockedWhat = nil, told = false, debug = false }
 local mail = {}
+local line = {}
 
 local function charDB()
   if type(FantasyForceCharDB) ~= "table" then FantasyForceCharDB = {} end
@@ -55,67 +59,13 @@ local function convertOutgoing(text, chatType)
   return Accent.fit(text, accent, strength, CHAT_LIMIT)
 end
 
--- 1. After the chat box parsed what you typed (send = 1 means Enter was pressed).
-local function afterParse(editBox, send)
-  if send ~= 1 or hooks.blocked or type(editBox) ~= "table" then return end
-  local text = try(editBox.GetText, editBox)
-  if type(text) ~= "string" or text == "" or text == editBox.ffConverted then return end
-  local out = convertOutgoing(text, try(editBox.GetAttribute, editBox, "chatType"))
-  if out ~= text then
-    editBox.ffConverted = out -- a second hook on the same send leaves it alone
-    try(editBox.SetText, editBox, out)
-  end
-end
-
-local function hookParse()
-  if type(hooksecurefunc) ~= "function" then return false end
-  local hooked = false
-  if ChatFrameUtil and type(ChatFrameUtil.ParseText) == "function" then
-    hooked = pcall(hooksecurefunc, ChatFrameUtil, "ParseText", afterParse) or hooked
-  end
-  if type(ChatEdit_ParseText) == "function" then
-    hooked = pcall(hooksecurefunc, "ChatEdit_ParseText", afterParse) or hooked
-  end
-  return hooked
-end
-
--- 2. A wrapper around a send function. Our own sends (and a wrapper calling another) pass through.
-local function wrap(tbl, key)
-  local orig = type(tbl) == "table" and tbl[key]
-  if type(orig) ~= "function" then return false end
-  local function wrapped(msg, chatType, ...)
-    if hooks.inSend then return orig(msg, chatType, ...) end
-    local ok, out = pcall(convertOutgoing, msg, chatType)
-    hooks.inSend = true
-    local r = { pcall(orig, ok and out or msg, chatType, ...) }
-    hooks.inSend = false
-    if not r[1] then error(r[2], 0) end
-    return r[2], r[3], r[4]
-  end
-  return (pcall(function() tbl[key] = wrapped end))
-end
-
-local function installHooks()
-  if hooks.mode then return end
-  if hookParse() then
-    hooks.mode = "parse"
-    return
-  end
-  local a = C_ChatInfo and wrap(C_ChatInfo, "SendChatMessage")
-  local b = wrap(_G or {}, "SendChatMessage")
-  hooks.mode = (a or b) and "wrap" or "none"
-end
-
-local function tellOnceIfUnavailable()
-  if hooks.told or not (hooks.mode == "none" or hooks.blocked) then return end
-  local accent = current()
-  if accent == "off" then return end
-  hooks.told = true
-  print_("this game version won't let addons change what you type, so chat isn't converted automatically. /troll <message> (or the mail button) still works.")
-end
-
 local function sendFn()
   return (C_ChatInfo and C_ChatInfo.SendChatMessage) or SendChatMessage
+end
+
+local function changed()
+  if type(ns.onSettingChanged) == "function" then pcall(ns.onSettingChanged) end
+  if line.refresh then pcall(line.refresh) end
 end
 
 -- /troll <message>: one message in troll to the chat the box is on.
@@ -132,7 +82,221 @@ local function sendOne(msg, editBox, accent)
   hooks.inSend = false
 end
 
--- ------------------------------------------------------------------ slash --
+-- ------------------------------------------------------------ the accent line --
+
+-- A chat switch typed at the start of the line, as in the game's box: "/g ", "/w Name ".
+line.SWITCH = { ["/s"] = "SAY", ["/say"] = "SAY", ["/y"] = "YELL", ["/yell"] = "YELL", ["/g"] = "GUILD", ["/guild"] = "GUILD",
+  ["/o"] = "OFFICER", ["/officer"] = "OFFICER", ["/p"] = "PARTY", ["/party"] = "PARTY", ["/ra"] = "RAID", ["/raid"] = "RAID",
+  ["/rw"] = "RAID_WARNING", ["/i"] = "INSTANCE_CHAT", ["/w"] = "WHISPER", ["/whisper"] = "WHISPER", ["/t"] = "WHISPER",
+  ["/tell"] = "WHISPER" }
+line.LABELS = { SAY = "Say", YELL = "Yell", GUILD = "Guild", OFFICER = "Officer", PARTY = "Party", RAID = "Raid",
+  RAID_WARNING = "Raid Warning", INSTANCE_CHAT = "Instance", CHANNEL = "Channel" }
+line.chatType = "SAY"
+
+-- The chat the game's chat box is on (read only), for the line to start on.
+function line.gameChat()
+  local box = _G and (_G.ChatFrame1EditBox or (_G.ChatFrame1 and _G.ChatFrame1.editBox)) or nil
+  local chatType = box and try(box.GetAttribute, box, "chatType")
+  chatType = type(chatType) == "string" and chatType or "SAY"
+  if chatType == "WHISPER" then return chatType, try(box.GetAttribute, box, "tellTarget") end
+  if chatType == "CHANNEL" then return chatType, try(box.GetAttribute, box, "channelTarget") end
+  if not line.LABELS[chatType] then return "SAY" end
+  return chatType
+end
+
+function line.make()
+  if line.frame then return line.frame end
+  if not CreateFrame then return nil end
+  local ok, f = pcall(CreateFrame, "EditBox", "FantasyForceAccentLine", UIParent, "InputBoxTemplate")
+  if not ok or not f then ok, f = pcall(CreateFrame, "EditBox", "FantasyForceAccentLine2", UIParent) end
+  if not ok or not f then return nil end
+  line.frame = f
+  f:Hide()
+  f:SetHeight(24)
+  f:SetAutoFocus(false)
+  try(f.SetFontObject, f, ChatFontNormal)
+  try(f.SetMaxLetters, f, CHAT_LIMIT)
+  try(f.SetHistoryLines, f, 30)
+  try(f.SetAltArrowKeyMode, f, false)
+  try(f.SetFrameStrata, f, "DIALOG")
+  -- where the game's chat box sits, under the first chat window
+  local cf = _G and _G.ChatFrame1
+  if type(cf) == "table" then
+    f:SetPoint("TOPLEFT", cf, "BOTTOMLEFT", 2, -6)
+    f:SetPoint("TOPRIGHT", cf, "BOTTOMRIGHT", -2, -6)
+  else
+    f:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 40, 120)
+    f:SetWidth(420)
+  end
+  f.label = f:CreateFontString(nil, "OVERLAY", "ChatFontNormal")
+  f.label:SetPoint("LEFT", f, "LEFT", 4, 0)
+  f:SetScript("OnEnterPressed", function() pcall(line.send) end)
+  f:SetScript("OnEscapePressed", function() pcall(line.close) end)
+  f:SetScript("OnTextChanged", function(_, user) if user then pcall(line.switch) end end)
+  f:SetScript("OnEditFocusLost", function(self) if str(try(self.GetText, self)) == "" then pcall(line.close) end end)
+  return f
+end
+
+-- The label in front ("Say (troll):", "Tell Grukka:") in the chat's colour, and the text after it.
+function line.draw()
+  local f = line.frame
+  if not f then return end
+  local t = line.chatType
+  local label = t == "WHISPER" and ("Tell " .. str(line.target) .. ":") or ((line.LABELS[t] or t) .. ":")
+  local accent = current()
+  if accent ~= "off" and charDB().chatTypes[t] and not hooks.blocked then label = label:sub(1, -2) .. " (" .. accent .. "):" end
+  f.label:SetText(label)
+  local info = type(ChatTypeInfo) == "table" and ChatTypeInfo[t]
+  if type(info) == "table" and info.r then f.label:SetTextColor(info.r, info.g, info.b) else f.label:SetTextColor(1, 1, 1) end
+  try(f.SetTextInsets, f, (tonumber(try(f.label.GetStringWidth, f.label)) or 60) + 10, 6, 0, 0)
+end
+
+-- Opens the line on a chat (else the one the game's box is on) with text in it; true when it's open.
+function line.open(chatType, target, text)
+  local f = line.make()
+  if not f then return false end
+  if not chatType then chatType, target = line.gameChat() end
+  line.chatType, line.target = chatType, target
+  line.draw()
+  f:Show()
+  f:SetText(text or "")
+  try(f.SetFocus, f)
+  try(f.SetCursorPosition, f, #(text or ""))
+  return true
+end
+
+function line.close()
+  local f = line.frame
+  if not f then return end
+  f:SetText("")
+  try(f.ClearFocus, f)
+  f:Hide()
+end
+
+-- A link (shift-click in the addon's windows) goes at the cursor of the open line, else opens it.
+function line.insertLink(link)
+  local f = line.frame
+  if f and f:IsShown() then
+    if not try(f.Insert, f, link) then f:SetText(str(try(f.GetText, f)) .. link) end
+    try(f.SetFocus, f)
+    return true
+  end
+  return line.open(nil, nil, link)
+end
+
+-- "/g " or "/w Name " typed at the start switches the chat, as in the game's box.
+function line.switch()
+  local f = line.frame
+  local text = str(try(f.GetText, f))
+  local word, rest = text:match("^(/%S+)%s(.*)$")
+  local kind = word and line.SWITCH[word:lower()]
+  if not kind then return end
+  if kind == "WHISPER" then
+    local name, after_ = rest:match("^(%S+)%s(.*)$")
+    if not name then return end
+    line.target, rest = name, after_
+  end
+  line.chatType = kind
+  line.draw()
+  f:SetText(rest)
+end
+
+-- Enter: the line goes out in the accent (when it's on and the chat is on its list), then closes.
+function line.send()
+  local f = line.frame
+  local text = str(try(f.GetText, f))
+  if text:match("^%s*$") then return line.close() end
+  if text:sub(1, 1) == "/" then
+    print_("slash commands go in the game's chat box; this line is for talking (/s, /g, /w Name switch it).")
+    return
+  end
+  local out = convertOutgoing(text, line.chatType)
+  try(f.AddHistoryLine, f, text)
+  local target = (line.chatType == "WHISPER" or line.chatType == "CHANNEL") and line.target or nil
+  hooks.inSend = true
+  local ok = pcall(sendFn(), out, line.chatType, nil, target)
+  hooks.inSend = false
+  if hooks.debug then
+    hooks.debug = false
+    print_("accent debug: the accent line sent " .. line.chatType .. (out ~= text and ", in the accent" or ", as typed")
+      .. (ok and "" or " (the send failed)") .. ".")
+  end
+  line.close()
+end
+
+-- The speech bubble by the first chat tab: shown while an accent is on.
+function line.makeBubble()
+  if line.bubble or not CreateFrame then return line.bubble end
+  local ok, b = pcall(CreateFrame, "Button", "FantasyForceAccentBubble", UIParent)
+  if not ok or not b then return nil end
+  line.bubble = b
+  b:SetSize(20, 20)
+  local tab = _G and _G.ChatFrame1Tab
+  local cf = _G and _G.ChatFrame1
+  if type(tab) == "table" then
+    b:SetPoint("LEFT", tab, "RIGHT", 2, -2)
+  elseif type(cf) == "table" then
+    b:SetPoint("BOTTOMLEFT", cf, "TOPLEFT", 0, 4)
+  else
+    b:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", 40, 300)
+  end
+  b.icon = b:CreateTexture(nil, "ARTWORK")
+  b.icon:SetAllPoints()
+  b.icon:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-Chat-Up")
+  local hl = b:CreateTexture(nil, "HIGHLIGHT")
+  hl:SetAllPoints()
+  hl:SetTexture("Interface\\ChatFrame\\UI-ChatIcon-Chat-Up")
+  try(hl.SetBlendMode, hl, "ADD")
+  b:SetScript("OnClick", function() pcall(line.open) end)
+  b:SetScript("OnEnter", function(self)
+    pcall(function()
+      local accent, strength = current()
+      GameTooltip:SetOwner(self, "ANCHOR_TOP")
+      GameTooltip:SetText("Accent chat")
+      local c = type(HIGHLIGHT_FONT_COLOR) == "table" and HIGHLIGHT_FONT_COLOR or { r = 1, g = 1, b = 1 }
+      GameTooltip:AddLine("Talk in your accent (" .. accent .. ", " .. strength .. "). Also on a key: Key Bindings, Fantasy Force.", c.r, c.g, c.b, true)
+      GameTooltip:Show()
+    end)
+  end)
+  b:SetScript("OnLeave", function() if GameTooltip then try(GameTooltip.Hide, GameTooltip) end end)
+  return b
+end
+
+function line.refresh()
+  local accent = current()
+  local b = line.bubble
+  if b then
+    if accent ~= "off" and not hooks.blocked then b:Show() else b:Hide() end
+  end
+  if line.frame and line.frame:IsShown() then line.draw() end
+end
+
+-- The key binding (Bindings.xml) calls this.
+BINDING_HEADER_FANTASYFORCE = "Fantasy Force"
+BINDING_NAME_FANTASYFORCE_ACCENTLINE = "Accent chat line"
+function FantasyForce_OpenAccentLine()
+  pcall(line.open)
+end
+
+local function installHooks()
+  if hooks.mode then return end
+  local f = line.make()
+  line.makeBubble()
+  hooks.mode = f and "line" or "none"
+  line.refresh()
+end
+
+local function tellOnceIfUnavailable()
+  if hooks.told or not (hooks.mode == "none" or hooks.blocked) then return end
+  local accent = current()
+  if accent == "off" and not hooks.blocked then return end
+  hooks.told = true
+  if hooks.blocked then
+    print_("the game blocked FantasyForce (" .. str(hooks.blockedWhat) .. "), so the accent line is off. /troll <message> (or the mail button) still works.")
+  else
+    print_("this game version won't let addons make a chat line, so chat isn't converted. /troll <message> (or the mail button) still works.")
+  end
+end
 
 -- ---------------------------------------------------------------- setters --
 -- The slash commands and the window's controls change settings through these, so they stay in
@@ -142,13 +306,9 @@ local NAMES = { auto = true, off = true }
 for _, a in ipairs(Accent.ACCENTS) do NAMES[a] = true end
 local SAMPLE = "Hello friend, I am going to the bank with you. Thank you!"
 
-local function changed()
-  if type(ns.onSettingChanged) == "function" then pcall(ns.onSettingChanged) end
-end
-
--- Can typed chat be converted in this game (a hook is in and the game hasn't blocked it)?
+-- Can what you say be converted here (the line is in and the game hasn't blocked us)?
 local function canConvert()
-  return (hooks.mode == "parse" or hooks.mode == "wrap") and not hooks.blocked
+  return hooks.mode == "line" and not hooks.blocked
 end
 
 -- One short line: which accent is on, or that it's off.
@@ -160,6 +320,14 @@ local function nowLine()
   return "accent on: " .. accent .. (c.accent == "auto" and " (auto)" or "") .. ", " .. strength .. "."
 end
 
+-- The first time an accent goes on: where to talk in it.
+local function withHint(s)
+  local c = charDB()
+  if c.accent == "off" or c.lineHinted or not canConvert() then return s end
+  c.lineHinted = true
+  return s .. " Talk in it with the speech bubble by your chat tab (or /troll <message>); the game's chat box stays as typed."
+end
+
 -- For the window's accent switch: "Troll, thick" or "Off".
 local function shortStatus()
   local c = charDB()
@@ -169,7 +337,7 @@ local function shortStatus()
   return accent:sub(1, 1):upper() .. accent:sub(2) .. ", " .. strength
 end
 
--- /accent status: the accent, the chats, and whether chat can be converted here.
+-- /accent status: the accent, the chats, and where it applies.
 local function statusText()
   local c = charDB()
   local types = {}
@@ -177,9 +345,20 @@ local function statusText()
   table.sort(types)
   local s = nowLine() .. " Chats: " .. table.concat(types, ", ") .. "."
   if hooks.mode and not canConvert() then
-    s = s .. " This game won't let addons change what you type: /troll <message> and the mail button still work."
+    s = s .. " This game won't let addons change what you say: /troll <message> and the mail button still work."
+  elseif hooks.mode then
+    s = s .. " It goes on the accent line (the bubble by the chat tab) and /troll."
   end
   return s
+end
+
+-- /accent debug: what's in, what's blocked; the line says how the next message went.
+local function debugText()
+  hooks.debug = true
+  return "accent debug: game chat box hooks: none (by design). Accent line: " .. (line.frame and "ready" or "none")
+    .. ", bubble: " .. (line.bubble and (line.bubble:IsShown() and "shown" or "hidden") or "none")
+    .. ". Blocked: " .. (hooks.blockedWhat and str(hooks.blockedWhat) or "nothing") .. "."
+    .. (line.frame and " Send a line from the bubble: the next line says how it went." or "")
 end
 
 -- The sample sentence in the accent now in use (as typed when it's off).
@@ -197,7 +376,7 @@ local function setAccent(name)
   c.accent = name
   changed()
   tellOnceIfUnavailable()
-  return nowLine()
+  return withHint(nowLine())
 end
 
 local function setStrength(s)
@@ -223,56 +402,62 @@ local function toggle()
   if c.lastStrength then c.strength = c.lastStrength end
   changed()
   tellOnceIfUnavailable()
-  return nowLine()
+  return withHint(nowLine())
 end
 
-SlashCmdList = SlashCmdList or {}
+-- Our slash commands: our own SLASH_ names and new keys in the game's SlashCmdList (never assigning
+-- the SlashCmdList global itself, which would taint the game's chat box).
 SLASH_FANTASYFORCEACCENT1 = "/accent"
-SlashCmdList["FANTASYFORCEACCENT"] = function(msg)
-  local ok = pcall(function()
-    msg = str(msg):lower():gsub("^%s+", ""):gsub("%s+$", "")
-    if msg == "" then
-      print_(toggle())
-    elseif NAMES[msg] then
-      print_(setAccent(msg))
-    elseif msg == "light" or msg == "thick" then
-      print_(setStrength(msg))
-    elseif msg == "status" then
-      print_(statusText())
-    elseif msg == "help" then
-      if type(ns.printHelp) == "function" then ns.printHelp("/accent", "/troll") end
-    else
-      local kind, onoff = msg:match("^chat%s+(%a+)%s+(%a+)$")
-      if kind and (onoff == "on" or onoff == "off") then
-        print_(setChatType(kind, onoff == "on"))
-      else
-        print_("there's no /accent " .. msg .. ": /accent help lists the commands.")
-      end
-    end
-  end)
-  if not ok then print_("something went wrong.") end
-end
-
 SLASH_FANTASYFORCETROLL1 = "/troll"
-SlashCmdList["FANTASYFORCETROLL"] = function(msg, editBox)
-  local ok = pcall(function()
-    local c = charDB()
-    msg = str(msg):gsub("^%s+", ""):gsub("%s+$", "")
-    if msg ~= "" then
-      sendOne(msg, editBox, "troll")
-      return
-    end
-    if c.accent == "troll" then
-      print_(setAccent((c.before and c.before ~= "troll") and c.before or "off"))
-    else
-      c.before = c.accent
-      print_(setAccent("troll"))
-    end
-  end)
-  if not ok then print_("something went wrong.") end
+if type(SlashCmdList) == "table" then
+  SlashCmdList["FANTASYFORCEACCENT"] = function(msg)
+    local ok = pcall(function()
+      msg = str(msg):lower():gsub("^%s+", ""):gsub("%s+$", "")
+      if msg == "" then
+        print_(toggle())
+      elseif NAMES[msg] then
+        print_(setAccent(msg))
+      elseif msg == "light" or msg == "thick" then
+        print_(setStrength(msg))
+      elseif msg == "status" then
+        print_(statusText())
+      elseif msg == "debug" then
+        print_(debugText())
+      elseif msg == "help" then
+        if type(ns.printHelp) == "function" then ns.printHelp("/accent", "/troll") end
+      else
+        local kind, onoff = msg:match("^chat%s+(%a+)%s+(%a+)$")
+        if kind and (onoff == "on" or onoff == "off") then
+          print_(setChatType(kind, onoff == "on"))
+        else
+          print_("there's no /accent " .. msg .. ": /accent help lists the commands.")
+        end
+      end
+    end)
+    if not ok then print_("something went wrong.") end
+  end
+
+  SlashCmdList["FANTASYFORCETROLL"] = function(msg, editBox)
+    local ok = pcall(function()
+      local c = charDB()
+      msg = str(msg):gsub("^%s+", ""):gsub("%s+$", "")
+      if msg ~= "" then
+        sendOne(msg, editBox, "troll")
+        return
+      end
+      if c.accent == "troll" then
+        print_(setAccent((c.before and c.before ~= "troll") and c.before or "off"))
+      else
+        c.before = c.accent
+        print_(setAccent("troll"))
+      end
+    end)
+    if not ok then print_("something went wrong.") end
+  end
 end
 
 -- ------------------------------------------------------------------- mail --
+-- The one place the addon changes a game frame's text: the letter you're writing, when you press Accent.
 
 local function mailBody()
   if SendMailBodyEditBox then return SendMailBodyEditBox end
@@ -369,16 +554,16 @@ if frame then
   for _, ev in ipairs({ "PLAYER_LOGIN", "MAIL_SHOW", "ADDON_ACTION_BLOCKED", "ADDON_ACTION_FORBIDDEN" }) do
     pcall(frame.RegisterEvent, frame, ev)
   end
-  frame:SetScript("OnEvent", function(_, event, arg1)
+  frame:SetScript("OnEvent", function(_, event, arg1, arg2)
     pcall(function()
       if event == "PLAYER_LOGIN" then
         installHooks()
         tellOnceIfUnavailable()
       elseif event == "MAIL_SHOW" then
         makeMailButton()
-      elseif (event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN") and arg1 == "FantasyForce"
-        and hooks.mode == "wrap" then
-        hooks.blocked = true -- the wrapper now passes everything through untouched
+      elseif (event == "ADDON_ACTION_BLOCKED" or event == "ADDON_ACTION_FORBIDDEN") and arg1 == "FantasyForce" then
+        hooks.blocked = true -- nothing is converted from now on; what you type goes out as typed
+        hooks.blockedWhat = str(arg2) ~= "" and arg2 or event
         tellOnceIfUnavailable()
         changed()
       end
@@ -386,7 +571,16 @@ if frame then
   end)
 end
 
--- For the tests.
+-- For the main file (its Whisper, Ask and link buttons use the line) and the tests.
 ns.AccentChat = { installHooks = installHooks, hooks = hooks, current = current, convertOutgoing = convertOutgoing,
   charDB = charDB, setAccent = setAccent, setStrength = setStrength, setChatType = setChatType, toggle = toggle,
-  statusText = statusText, shortStatus = shortStatus, canConvert = canConvert, preview = preview, SAMPLE = SAMPLE }
+  statusText = statusText, shortStatus = shortStatus, canConvert = canConvert, preview = preview, SAMPLE = SAMPLE,
+  line = line, openLine = line.open, insertLink = line.insertLink, debugText = debugText,
+  -- what the line holds, as typed in chat: "/w Grukka Hi!" for a whisper, else the text
+  describeLine = function()
+    local f = line.frame
+    if not (f and f:IsShown()) then return nil end
+    local text = str(try(f.GetText, f))
+    if line.chatType == "WHISPER" then return "/w " .. str(line.target) .. " " .. text end
+    return text
+  end }

@@ -58,12 +58,15 @@ Talk like your race, for fun. Off until you pick one; it's saved per character. 
 - `/accent` turns it on or off, remembering which accent and strength you had (the very first time: your race's). The speech bubble in the window does the same. `/accent status` says what's on and whether this game lets it change chat.
 - `/accent troll` (or `orc`, `tauren`, `undead`, `skyborne`), `/accent auto` (your character's race: Troll, Orc, Tauren, Forsaken, Skyborne; Alliance races stay plain), `/accent off`.
 - `/accent light` swaps a few words; `/accent thick` swaps more and now and then adds a closing line ("Ya mon!", "Lok'tar!", "Walk with the Earth Mother.").
-- It converts what you type in say, yell, guild, officer, party, raid and whispers. `/accent chat <type> on|off` changes the list (e.g. `/accent chat whisper off`). Never channels like Trade.
+- Where you talk in it: the accent's own chat line. Click the speech bubble by your chat tab (shown while an accent is on), or set a key in Key Bindings > Fantasy Force. It opens where the chat box sits, on the chat the game's box is on (`/s`, `/g`, `/w Name` at its start switch it, as in the game's box), and Enter sends it in your accent. The addon's Whisper and Ask buttons open it too, and shift-clicked links go into it.
+- The game's own chat box is never touched, so what you type there goes out as typed. On newer game versions an addon that hooks or writes to the chat box gets the game's own chat and slash commands blocked ("FantasyForce has been blocked from an action only available to the Blizzard UI"), so this addon doesn't.
+- It converts say, yell, guild, officer, party, raid and whispers. `/accent chat <type> on|off` changes the list (e.g. `/accent chat whisper off`). Never channels like Trade.
+- `/accent debug` says what's in (the line, the bubble, no chat box hooks) and anything the game blocked, then how the next line you send went.
 - `/troll` turns troll on and off; `/troll <message>` sends that one message in troll to the chat you're typing in, whatever your accent is.
 - Mail: the send mail window has an Accent button in the corner of the letter. It rewrites the letter (and its subject, lightly) in your accent (or your race's, if you haven't picked one). Press it again within 10 seconds to undo.
 - Never changed: item, spell and quest links, coloured text, player names in links, `/commands`, raid icons like `{skull}`, `[anything in brackets]`, `@names`, web addresses and numbers (300g, 3:30, 10x). A message that would go past chat's 255 letters drops its closing line, then goes light, then goes as typed.
 - The word lists are tables at the top of `Accent.lua`, easy to edit. Skyborne is new in Forever, so its accent (sky, wind and wings) is a placeholder until the race has a voice of its own.
-- If this game version won't let addons change what you type, one line says so; `/troll <message>` and the mail button still work.
+- If the game ever blocks the addon, one line says what it blocked and the accent line sends as typed; `/troll <message>` and the mail button still work.
 
 ## Where the data lives
 
