@@ -314,6 +314,8 @@
       if (el.input) {
         const inp = el.input;
         inp.style.font = fontCss(n.font);
+        inp.style.paddingLeft = n.ins ? n.ins[0] + 'px' : '';
+        inp.style.paddingRight = n.ins ? n.ins[1] + 'px' : '';
         if (inp.value !== n.txt) inp.value = n.txt;
         // SetFocus in the addon puts the caret in the box, as in the game
         if (n.foc && document.activeElement !== inp) setTimeout(() => { if (inp.isConnected && document.activeElement !== inp) inp.focus(); }, 0);
@@ -363,7 +365,8 @@
       // an edit box whose script put its text back (the copy boxes) shows the game's text, not what was typed
       else if (e.el.input && e.el.input.value !== n.txt) e.el.input.value = n.txt;
     }
-    for (const [id, e] of els) if (!seen.has(id)) { e.el.remove(); els.delete(id); }
+    // delete first: removing a focused box fires blur, which can render again before this loop ends
+    for (const [id, e] of [...els]) if (!seen.has(id) && els.get(id) === e) { els.delete(id); if (e.el.isConnected) e.el.remove(); }
     showHighlights();
   }
   // HIGHLIGHT-layer textures show while their frame is under the mouse (or its highlight is locked).

@@ -245,6 +245,7 @@ function P.snapshot()
           n.txt = f._text or ""
           n.font = f._font
           n.foc = client.focus == f
+          if f._textInsets then n.ins = f._textInsets end
           if f._highlighted then n.sela = true f._highlighted = false end
         end
         nodes[#nodes + 1] = n

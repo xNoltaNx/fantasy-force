@@ -348,6 +348,8 @@ function FakeGame.newClient(o)
 
   -- edit boxes
   function Frame.SetAutoFocus(f, on) f._autoFocus = on and true or false end
+  function Frame.SetTextInsets(f, l, r, t, b) f._textInsets = { l or 0, r or 0, t or 0, b or 0 } end
+  function Frame.GetTextInsets(f) local i = f._textInsets or { 0, 0, 0, 0 } return i[1], i[2], i[3], i[4] end
   function Frame.SetFocus(f)
     if client.focus == f then return end
     if client.focus then client.focus:ClearFocus() end
