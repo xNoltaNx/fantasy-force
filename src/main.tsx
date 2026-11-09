@@ -82,7 +82,7 @@ function Shell() {
       {/* any click or typing may reveal new item links (an opened list, a search); have Wowhead look again */}
       <main onClick={() => setClicks((n) => n + 1)} onInput={() => setClicks((n) => n + 1)}>
         {page === 'roster' && <Roster />}
-        {page === 'events' && <Events />}
+        {page === 'events' && <Events pick={arg} />}
         {page === 'availability' && <Availability />}
         {page === 'balance' && <Balance />}
         {page === 'professions' && <Professions pick={arg} />}

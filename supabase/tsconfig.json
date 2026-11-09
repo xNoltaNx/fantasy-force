@@ -1,0 +1,10 @@
+{
+  // Type-checks the Edge Functions with the site's settings: `npm run check:functions`.
+  // Deno itself ignores this file; Deno's `.ts` import paths need allowImportingTsExtensions.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "types": []
+  },
+  "include": ["functions", "deno-globals.d.ts"]
+}

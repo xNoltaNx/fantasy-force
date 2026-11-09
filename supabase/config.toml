@@ -1,0 +1,9 @@
+# For the Supabase CLI, which deploys the Edge Functions (.github/workflows/deploy-functions.yml).
+project_id = "fantasy-force"
+
+# Discord signs its requests and the database sends its own secret, so Supabase's JWT check is off.
+[functions.discord-interactions]
+verify_jwt = false
+
+[functions.discord-announce]
+verify_jwt = false

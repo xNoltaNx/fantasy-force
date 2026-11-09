@@ -91,6 +91,7 @@ export interface GuildEvent {
   need_healer: number
   need_dps: number
   created_by: string
+  discord_message_id?: string | null // its post in the guild's Discord channel, once the bot has posted it (live site only)
 }
 
 export type SignupStatus = 'in' | 'maybe' | 'out'

@@ -45,6 +45,7 @@ It's free: Supabase's free tier holds the data and handles Discord sign-in, and 
    where display_name = 'YourDiscordName';
    ```
    Everything else (guild name, realm, ranks, approving members) is done on the site's Officers page.
+7. **Discord bot** (optional). Events post themselves in a Discord channel with **Tank**, **Healer**, **DPS** and **Can't make it** buttons, keep their sign-up counts up to date, and get a reminder reply an hour before they start that pings everyone going. It reuses the sign-in Discord app. In short: make the app's bot and invite it to your server; copy the channel id; add the `SUPABASE_ACCESS_TOKEN` GitHub secret and the four `DISCORD_*` Supabase secrets; run the **Deploy the Discord bot** workflow; set the app's Interactions Endpoint URL; paste `supabase/discord-bot.sql` into the SQL Editor. Step by step, with every button's name: [`supabase/DISCORD-SETUP.md`](supabase/DISCORD-SETUP.md).
 
 ## Who can see and change what
 
@@ -58,3 +59,5 @@ The rules live in the database (`supabase/schema.sql`), so they hold whatever th
 ## Code
 
 Vite, React and TypeScript. `src/store/` is the one data layer, with two backends: `demo.ts` (the browser) and `supabase.ts` (live). `src/wow.ts` holds classes, specs, roles and class colours. `npm test` runs the unit tests and `npm run build` makes `dist/`.
+
+The Discord bot is two Supabase Edge Functions, no always-on server: `supabase/functions/discord-interactions` (Discord's Interactions Endpoint: checks Discord's signature, turns a button press into a sign-up) and `supabase/functions/discord-announce` (posts, edits and deletes the event posts and sends reminders; only the guild's own database may call it, with the secret in `discord_state`). Database triggers call it through `pg_net` when an event or a sign-up changes, and a `pg_cron` job every 5 minutes for reminders; edits are held to one per event every 5 seconds. The logic is in `supabase/functions/_shared/`, plain TypeScript the functions import and vitest tests; `npm run check:functions` type-checks it. Its SQL is in `supabase/discord-bot.sql` and, the same, in `schema.sql`. `.github/workflows/deploy-functions.yml` deploys the functions when they change on `master`.

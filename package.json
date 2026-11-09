@@ -8,6 +8,7 @@
     "build": "tsc -b && vite build",
     "preview": "vite preview",
     "test": "vitest run",
+    "check:functions": "tsc --noEmit -p supabase",
     "addon-preview": "node tools/addon-preview/build.mjs"
   },
   "dependencies": {

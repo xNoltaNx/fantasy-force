@@ -123,6 +123,8 @@ textarea { resize: vertical; width: 100%; }
 .button.ghost:hover { border-color: var(--accent); filter: none; }
 .button.small { padding: 0.2rem 0.7rem; font-size: 0.88rem; }
 .button.discord { background: var(--discord); color: #fff; }
+.discord-mark { display: inline-flex; vertical-align: middle; margin-left: 0.5rem; color: var(--muted); opacity: 0.45; cursor: help; }
+.discord-mark.on { color: var(--discord); opacity: 1; }
 .button:disabled { opacity: 0.4; cursor: default; filter: none; }
 .row { display: flex; gap: 0.6rem; flex-wrap: wrap; align-items: center; }
 .check { display: inline-flex; gap: 0.35rem; align-items: center; }
