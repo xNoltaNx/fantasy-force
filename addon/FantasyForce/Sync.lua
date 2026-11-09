@@ -561,10 +561,12 @@ function S.encodeCraftRequest(id, r)
     S.b36(r.created), S.esc(r.class or ""), S.b36(r.item), named and S.esc(r.name or "") or "" }, "~") .. "~"
   local room = S.MAX_MESSAGE - #header("Q", id, r.updated, 1, 1)
   local note = S.cleanNote(r.note)
-  local body = head .. S.esc(note)
+  -- the crafter asked, when one was picked: after the note, so an addon from before reads the note as ever
+  local to = (type(r.to) == "string" and r.to ~= "") and ("~" .. S.esc(r.to)) or ""
+  local body = head .. S.esc(note) .. to
   while #body > room and note ~= "" do
     note = dropLastLetter(note)
-    body = head .. S.esc(note)
+    body = head .. S.esc(note) .. to
   end
   return body
 end
@@ -582,7 +584,8 @@ function S.decodeCraftRequest(id, updated, body)
   return { asker = p.asker, prof = p.prof, key = p.key, spell = p.spell, item = p.item or (item and item > 0 and item) or nil,
     name = (f[8] and f[8] ~= "") and S.unesc(f[8]) or nil, qty = math.max(1, math.min(S.QTY_MAX, qty)), mats = f[2] == "1",
     state = state, claimer = state ~= "open" and claimer or nil, created = created, class = S.unesc(f[6]),
-    note = f[9] and S.cleanNote(S.unesc(f[9])) or "", updated = tonumber(updated) or created }
+    note = f[9] and S.cleanNote(S.unesc(f[9])) or "", updated = tonumber(updated) or created,
+    to = (f[10] and f[10] ~= "") and S.unesc(f[10]) or nil }
 end
 
 -- Keeps a request when it's newer (by the rules above). Returns true when it replaced what was there.
@@ -611,16 +614,21 @@ function S.pruneCraftRequests(reqs, now)
   end
 end
 
--- What one account sees, active requests only, newest first, each { id, r }: forYou (open, and one of its
--- characters can make it), taken (claimed, one of its characters can make it) and mine (its own characters'
--- requests). names = { [characterName] = true } on this account; keys = { [recipeKey] = true } it can make.
+-- What one account sees, active requests only, newest first, each { id, r }: forYou (open, one of its characters
+-- can make it, and it asks anyone or one of them), others (open, one of its characters can make it, but it asks
+-- someone else), taken (claimed, one of its characters can make it) and mine (its own characters' requests).
+-- names = { [characterName] = true } on this account; keys = { [recipeKey] = true } it can make.
 function S.craftRequestView(reqs, now, names, keys)
-  local v = { forYou = {}, taken = {}, mine = {} }
+  local v = { forYou = {}, others = {}, taken = {}, mine = {} }
   for id, r in pairs(reqs or {}) do
     if S.requestActive(r, now) then
       local list
       if names[r.asker] then list = v.mine
-      elseif keys[r.key] then list = r.state == "open" and v.forYou or v.taken end
+      elseif keys[r.key] then
+        if r.state ~= "open" then list = v.taken
+        elseif r.to and not names[r.to] then list = v.others
+        else list = v.forYou end
+      end
       if list then list[#list + 1] = { id = id, r = r } end
     end
   end
@@ -629,6 +637,7 @@ function S.craftRequestView(reqs, now, names, keys)
     return a.id < b.id
   end
   sort(v.forYou, newest)
+  sort(v.others, newest)
   sort(v.taken, newest)
   sort(v.mine, newest)
   return v

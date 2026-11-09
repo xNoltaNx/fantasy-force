@@ -1369,7 +1369,7 @@ end
 
 -- This character asks for a recipe entry (the Crafting tab's: key, prof, id, item, name). False when it
 -- already has an open request for it.
-function asks.create(e, qty, mats, note)
+function asks.create(e, qty, mats, note, to)
   if not Sync or type(e) ~= "table" or not e.key then return false end
   local me, now = readName(), time()
   local id = Sync.craftRequestId(me, e.key)
@@ -1378,8 +1378,32 @@ function asks.create(e, qty, mats, note)
   asks.push(id, { asker = me, class = type(rec) == "table" and str(rec.class) or "", prof = e.prof, key = e.key,
     spell = e.id, item = e.item, name = not (e.id or e.item) and e.name or nil,
     qty = math.max(1, math.min(Sync.QTY_MAX, floor(num(qty, 1)))), mats = mats and true or false,
-    note = Sync.cleanNote(note), state = "open", created = now })
+    note = Sync.cleanNote(note), state = "open", created = now, to = (type(to) == "string" and to ~= "") and to or nil })
   return true, id
+end
+
+-- The wizard's Send: asks for it, or changes this character's open request for it (how many, mats, note, who).
+function asks.request(e, qty, mats, note, to)
+  if not Sync or type(e) ~= "table" or not e.key then return false end
+  local id = Sync.craftRequestId(readName(), e.key)
+  local r = initDB().requests[id]
+  if Sync.requestActive(r, time()) and asks.mine(r) then
+    r.qty = math.max(1, math.min(Sync.QTY_MAX, floor(num(qty, 1))))
+    r.mats, r.note = mats and true or false, Sync.cleanNote(note)
+    r.to = (type(to) == "string" and to ~= "") and to or nil
+    asks.push(id, r)
+    return true, id, true
+  end
+  return asks.create(e, qty, mats, note, to)
+end
+
+-- The asker's "Ask anyone": a request made to one crafter goes to everyone who can make it.
+function asks.askAnyone(id)
+  local r = initDB().requests[id]
+  if not Sync or not Sync.requestActive(r, time()) or not asks.mine(r) or not r.to then return false end
+  r.to = nil
+  asks.push(id, r)
+  return true
 end
 
 -- "claimed" (by this character, someone else's open request), "done" or "cancelled" (this account's own), or
@@ -3394,7 +3418,10 @@ function craftsWindow.make(w, host)
     pcall(ui.render, w)
   end, "Only recipes someone online can make (on Requests: whoever asked is online).")
   ui.makeSortHeaders(w, host, "Crafters", "Most crafters first; again for fewest first.", 418)
-  host:HookScript("OnShow", function() if w.form then w.form:Hide() end end)
+  w.newRequest = ui.button(host, w.left + 2, -28, 110, "New request", function() craftsWindow.openWizard(w, nil) end,
+    "Ask the guild's crafters for something: pick a recipe, who makes it, and how many.")
+  if w.newRequest then w.newRequest:Hide() end
+  host:HookScript("OnShow", function() if w.wizard then w.wizard:Hide() end end)
 end
 
 -- After each redraw: the professions, and the picked recipe (remembered; else the first one shown), or on
@@ -3402,6 +3429,7 @@ end
 function craftsWindow.after(w, data)
   ui.drawMaster(w, data.masters or {})
   ui.drawSortHeaders(w, w.master ~= asks.REQ)
+  if w.newRequest then if w.master == asks.REQ then w.newRequest:Show() else w.newRequest:Hide() end end
   if w.onlineBox then w.onlineBox:SetChecked(w.onlineOnly and true or false) end
   local field = w.master == asks.REQ and "reqPick" or "pick"
   local picked
@@ -3417,7 +3445,6 @@ function craftsWindow.after(w, data)
   local changed = key ~= w[field]
   w[field] = key
   if changed then ui.draw(w) end
-  if w.form and w.form.entry and (field ~= "pick" or w.form.entry.key ~= key) then w.form:Hide() end
   if field == "reqPick" then
     ui.drawDetail(w, picked and craftsWindow.describeRequest(w, picked), "No requests now.")
   else
@@ -3445,7 +3472,7 @@ function craftsWindow.shortAgo(t)
   return floor(s / 86400) .. "d"
 end
 
-craftsWindow.REQUEST_GROUPS = { { "forYou", "For you" }, { "taken", "Being made" }, { "mine", "Yours" } }
+craftsWindow.REQUEST_GROUPS = { { "forYou", "For you" }, { "others", "For others" }, { "taken", "Being made" }, { "mine", "Yours" } }
 
 function craftsWindow.requestRows(w, view, out)
   local online, search = onlineNames(), searchText(w)
@@ -3458,7 +3485,8 @@ function craftsWindow.requestRows(w, view, out)
       local hay = (name .. " " .. r.asker .. " " .. str(r.claimer)):lower()
       local mine = g[1] == "mine"
       if (search == "" or hay:find(search, 1, true)) and (not w.onlineOnly or mine or online[r.asker]) then
-        list[#list + 1] = { e = e, req = r, id = x.id, key = "req:" .. x.id, name = name, mine = mine, on = online[r.asker] and true or false }
+        list[#list + 1] = { e = e, req = r, id = x.id, key = "req:" .. x.id, name = name, mine = mine, on = online[r.asker] and true or false,
+          others = g[1] == "others" or nil }
       end
     end
     if #list > 0 then
@@ -3470,8 +3498,8 @@ function craftsWindow.requestRows(w, view, out)
     end
   end
   w.items_ = shown
-  local any = #view.forYou + #view.taken + #view.mine > 0
-  out.empty = any and "Nothing matches." or "No craft requests. Pick a recipe and press Request to ask for one."
+  local any = #view.forYou + #(view.others or {}) + #view.taken + #view.mine > 0
+  out.empty = any and "Nothing matches." or "No craft requests. Press New request to ask for one."
   out.footer = #shown .. (#shown == 1 and " request" or " requests")
   return out
 end
@@ -3483,13 +3511,16 @@ function craftsWindow.fillRequest(w, row, d)
   row.label:SetWidth(w.nameWidth - 70)
   row.label:SetText(d.name .. (num(r.qty, 1) > 1 and (gameColor("GRAY", true) .. " x" .. r.qty .. "|r") or "")
     .. (r.mats and (" " .. craftsWindow.MATS_ICON) or ""))
-  if d.e.item then row.label:SetTextColor(itemQualityColor(d.e.item)) else row.label:SetTextColor(gameColor("HIGHLIGHT")) end
+  if d.others then row.label:SetTextColor(gameColor("GRAY"))
+  elseif d.e.item then row.label:SetTextColor(itemQualityColor(d.e.item)) else row.label:SetTextColor(gameColor("HIGHLIGHT")) end
   local gray = gameColor("GRAY", true)
   local right
   if r.state == "claimed" then
     right = gray .. "by|r " .. (r.claimer == readName() and "you" or str(r.claimer))
   elseif d.mine then
-    right = gray .. "waiting|r"
+    right = gray .. (r.to and ("to " .. r.to) or "waiting") .. "|r"
+  elseif d.others then
+    right = gray .. "to " .. str(r.to) .. "|r"
   else
     right = (d.on and ONLINE_ICON or "") .. classHex(r.class) .. r.asker .. "|r " .. gray .. craftsWindow.shortAgo(r.created) .. "|r"
   end
@@ -3529,6 +3560,11 @@ function craftsWindow.describeRequest(w, d)
       tip = not online[r.asker] and "Offline" or nil, onClick = function() whisper(r.asker) end } or nil }
   lines[#lines + 1] = { text = facts[2] }
   if str(r.note) ~= "" then lines[#lines + 1] = { text = "\"" .. r.note .. "\"", color = "GRAY" } end
+  if r.to and r.state == "open" then
+    lines[#lines + 1] = { text = "Asked of " .. r.to, color = "GRAY",
+      button = d.mine and { label = "Ask anyone", width = 80, tip = "Let everyone who can make it see it, not only " .. r.to .. ".",
+        onClick = function() asks.askAnyone(id) end } or nil }
+  end
   if d.mine then
     lines[#lines + 1] = { text = facts[3], color = r.claimer and "GREEN" or "GRAY",
       button = { label = "Cancel", tip = "Take it off everyone's list.", onClick = function() asks.set(id, "cancelled") end } }
@@ -3549,45 +3585,414 @@ function craftsWindow.describeRequest(w, d)
     lines = lines }
 end
 
--- The little Request form over the detail pane: how many, I have mats, a short note, Send.
-function craftsWindow.openForm(w, e)
-  local p = w.form
-  if not p then
-    p = ui.popup(w.frame, 222, 108)
-    if not p then return end
-    local qty = p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    qty:SetPoint("TOPLEFT", p, "TOPLEFT", 12, -34)
-    qty:SetText("How many")
-    p.qty = ui.inputBox(p, 70, -28, 34, 3, "How many you'd like.", "How many")
-    if p.qty then try(p.qty.SetNumeric, p.qty, true) end
-    p.mats = ui.check(p, 112, -26, "I have mats", function() end, "You'll send or bring the materials.")
-    local note = p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
-    note:SetPoint("TOPLEFT", p, "TOPLEFT", 12, -58)
-    note:SetText("Note")
-    p.note = ui.inputBox(p, 48, -52, 162, Sync and Sync.NOTE_MAX or 60, "Optional, a few words: crafters see it on the request.", "Note")
-    local function send()
-      local qtyText = p.qty and try(p.qty.GetText, p.qty)
-      asks.create(p.entry, num(qtyText, 1), p.mats and p.mats:GetChecked(), p.note and try(p.note.GetText, p.note))
-      p:Hide()
-      pcall(ui.render, w)
-    end
-    p.send = ui.button(p, 130, -78, 80, "Send", send, "Ask the guild's crafters who can make it.")
-    for _, box in pairs({ p.qty, p.note }) do
-      box:SetScript("OnEnterPressed", send)
-      box:SetScript("OnEscapePressed", function() p:Hide() end)
-    end
-    w.form = p
+-- ------------------------------------------------------------- the request wizard --
+-- New request, in three steps on a small dialog of ours over the detail pane (the lists beside it stay usable):
+-- 1 Recipe (what someone else in the guild can make: search and a row of professions; online crafters first),
+-- 2 Crafter (anyone who can make it, or one of them), 3 Details (how many, I have mats, a note), then Send.
+-- When you've already asked for that recipe, Send says Update request and changes it. A recipe's Request
+-- button opens it on step 2 with that recipe picked. Back keeps every choice.
+craftsWindow.STEPS = { "Recipe", "Crafter", "Details" }
+craftsWindow.WIZ_W, craftsWindow.WIZ_ROW, craftsWindow.WIZ_QTY = 244, 18, 200
+
+function craftsWindow.index()
+  if not ui.crafts then
+    local list, profs, groups, byKey = craftsIndex()
+    ui.crafts = { list = list, profs = profs, groups = groups, byKey = byKey }
   end
-  p.entry = e
-  p.title:SetText("Request " .. recipeName(e))
-  if p.qty then p.qty:SetText("1") end
-  if p.note then p.note:SetText("") end
-  if p.mats then p.mats:SetChecked(false) end
-  p:ClearAllPoints()
-  p:SetPoint("TOPLEFT", w.frame, "TOPLEFT", w.detail and w.detail.x - 4 or 0, -44)
-  p:Show()
-  if p.qty then try(p.qty.SetFocus, p.qty) try(p.qty.HighlightText, p.qty) end
+  return ui.crafts
 end
+
+-- Every recipe someone off this account can make (search, profession), online crafters first, then by name.
+function craftsWindow.wizRecipes(s)
+  local online, out = onlineNames(), {}
+  local search = str(s.search):lower()
+  for _, e in ipairs(craftsWindow.index().list) do
+    local n, on = 0, false
+    for _, c in ipairs(e.crafters) do
+      if not c.own then
+        n = n + 1
+        if online[c.name] then on = true end
+      end
+    end
+    local name = recipeName(e)
+    if n > 0 and (not s.prof or e.prof == s.prof) and (search == "" or name:lower():find(search, 1, true)) then
+      out[#out + 1] = { e = e, name = name, count = n, on = on }
+    end
+  end
+  table.sort(out, function(a, b)
+    if a.on ~= b.on then return a.on end
+    if a.name ~= b.name then return a.name < b.name end
+    return a.e.key < b.e.key
+  end)
+  return out
+end
+
+-- Who else can make it (not this account's characters), online first.
+function craftsWindow.wizCrafters(e)
+  local out, own = {}, initDB().characters
+  for _, c in ipairs(craftsWindow.who(e, onlineNames(), craftsWindow.index().groups or {})) do
+    if not own[c.name] then out[#out + 1] = c end
+  end
+  return out
+end
+
+-- "Thorium Grenade x10, mats ready, to Pip Ashwhistle" / "... to anyone who can make it".
+function craftsWindow.wizSummary(s, e)
+  if not e then return "" end
+  return recipeName(e) .. " x" .. s.qty .. (s.mats and ", mats ready" or ", needs mats")
+    .. ", to " .. (s.to or "anyone who can make it")
+end
+
+-- This character's open request for a recipe, if any.
+function craftsWindow.myRequest(key)
+  if not Sync or not key then return nil end
+  local id = Sync.craftRequestId(readName(), key)
+  local r = initDB().requests[id]
+  if Sync.requestActive(r, time()) and asks.mine(r) then return id, r end
+  return nil
+end
+
+local function wizRow(p, i)
+  local row = p.rows[i]
+  if row then return row end
+  row = newFrame("Button", nil, p)
+  if not row then return nil end
+  row:SetSize(craftsWindow.WIZ_W - 20, craftsWindow.WIZ_ROW)
+  row.sel = row:CreateTexture(nil, "BACKGROUND")
+  row.sel:SetAllPoints()
+  row.sel:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+  try(row.sel.SetBlendMode, row.sel, "ADD")
+  row.sel:Hide()
+  local hl = row:CreateTexture(nil, "HIGHLIGHT")
+  hl:SetAllPoints()
+  hl:SetTexture("Interface\\QuestFrame\\UI-QuestTitleHighlight")
+  try(hl.SetBlendMode, hl, "ADD")
+  row.icon = row:CreateTexture(nil, "ARTWORK")
+  row.icon:SetSize(16, 16)
+  row.icon:SetPoint("LEFT", row, "LEFT", 1, 0)
+  row.text = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  row.text:SetJustifyH("LEFT")
+  try(row.text.SetWordWrap, row.text, false)
+  row.right = row:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  row.right:SetPoint("RIGHT", row, "RIGHT", -2, 0)
+  row.right:SetJustifyH("RIGHT")
+  row:SetScript("OnClick", function(self) if self.pick then pcall(self.pick) end end)
+  row:SetScript("OnEnter", function(self)
+    local tt = GameTooltip
+    if not tt or not self.tipTitle then return end
+    try(tt.SetOwner, tt, self, "ANCHOR_RIGHT")
+    try(tt.SetText, tt, self.tipTitle)
+    if self.tipText then
+      local r, g, b = gameColor("HIGHLIGHT")
+      try(tt.AddLine, tt, self.tipText, r, g, b, true)
+    end
+    try(tt.Show, tt)
+  end)
+  row:SetScript("OnLeave", hideTooltip)
+  try(row.EnableMouseWheel, row, true)
+  row:SetScript("OnMouseWheel", function(_, delta) craftsWindow.wizScroll(p.w, -delta * 3) end)
+  p.rows[i] = row
+  return row
+end
+
+function craftsWindow.wizScroll(w, by)
+  local s = w.wiz
+  if not s then return end
+  s.offset = math.max(0, num(s.offset, 0) + by)
+  pcall(craftsWindow.wizDraw, w)
+end
+
+-- Builds the dialog once.
+function craftsWindow.wizMake(w)
+  if w.wizard then return w.wizard end
+  local W = craftsWindow.WIZ_W
+  local H = math.max(300, num(w.height, 460) - 6)
+  local p = ui.popup(w.frame, W, H)
+  if not p then return nil end
+  p.w, p.rows, p.H = w, {}, H
+  p.title:SetText("New request")
+  p:HookScript("OnHide", hideTooltip) -- a tooltip of one of its buttons goes with it
+  -- solid behind it, so the detail pane it covers never shows through
+  local bg = p:CreateTexture(nil, "BACKGROUND", nil, -8)
+  bg:SetPoint("TOPLEFT", p, "TOPLEFT", 4, -4)
+  bg:SetPoint("BOTTOMRIGHT", p, "BOTTOMRIGHT", -4, 4)
+  setColor(bg, 0.03, 0.03, 0.05, 1)
+  try(p.EnableMouseWheel, p, true)
+  p:SetScript("OnMouseWheel", function(_, delta) craftsWindow.wizScroll(w, -delta * 3) end)
+  -- the step strip: 1 Recipe, 2 Crafter, 3 Details (a step already reached can be clicked)
+  p.steps = {}
+  for i, label in ipairs(craftsWindow.STEPS) do
+    local b = newFrame("Button", nil, p)
+    b:SetSize(72, 16)
+    b:SetPoint("TOPLEFT", p, "TOPLEFT", 10 + (i - 1) * 76, -26)
+    b.text = b:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    b.text:SetPoint("LEFT", b, "LEFT", 0, 0)
+    b.text:SetText(i .. " " .. label)
+    b:SetScript("OnClick", function()
+      local s = w.wiz
+      if s and i <= num(s.reached, 1) and (i == 1 or s.key) then s.step, s.offset = i, 0 pcall(craftsWindow.wizDraw, w) end
+    end)
+    p.steps[i] = b
+  end
+  p.line = p:CreateTexture(nil, "ARTWORK")
+  p.line:SetSize(W - 20, 1)
+  p.line:SetPoint("TOPLEFT", p, "TOPLEFT", 10, -44)
+  setColor(p.line, 0.6, 0.5, 0.2, 0.6)
+  -- step 1: search and the professions
+  p.search = newFrame("EditBox", nil, p, "SearchBoxTemplate") or ui.inputBox(p, 14, -50, W - 30, 40, "Recipe names.", "Search")
+  if p.search then
+    p.search:ClearAllPoints()
+    p.search:SetSize(W - 30, 20)
+    p.search:SetPoint("TOPLEFT", p, "TOPLEFT", 16, -50)
+    try(p.search.SetAutoFocus, p.search, false)
+    local function changed()
+      local s = w.wiz
+      if not s then return end
+      s.search, s.offset = str(try(p.search.GetText, p.search)), 0
+      pcall(craftsWindow.wizDraw, w)
+    end
+    if p.search.HookScript then p.search:HookScript("OnTextChanged", changed) else p.search:SetScript("OnTextChanged", changed) end
+  end
+  p.profs = {}
+  -- step 2: the note when nobody's online
+  p.nobody = p:CreateFontString(nil, "OVERLAY", "GameFontDisableSmall")
+  p.nobody:SetPoint("TOPLEFT", p, "TOPLEFT", 12, -50)
+  p.nobody:SetWidth(W - 24)
+  p.nobody:SetJustifyH("LEFT")
+  p.nobody:SetText("Nobody online now: they'll see it when they log in.")
+  -- step 3: how many (- and +), I have mats, a note, the summary
+  p.qtyLabel = p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  p.qtyLabel:SetPoint("TOPLEFT", p, "TOPLEFT", 12, -60)
+  p.qtyLabel:SetText("How many")
+  local function setQty(v)
+    local s = w.wiz
+    if not s then return end
+    s.qty = math.max(1, math.min(craftsWindow.WIZ_QTY, floor(num(v, 1))))
+    pcall(craftsWindow.wizDraw, w)
+  end
+  p.minus = ui.button(p, 76, -56, 22, "-", function() setQty((w.wiz and w.wiz.qty or 1) - 1) end, "One fewer.")
+  p.qty = ui.inputBox(p, 104, -56, 34, 3, "How many you'd like, 1 to " .. craftsWindow.WIZ_QTY .. ".", "How many")
+  if p.qty then
+    try(p.qty.SetNumeric, p.qty, true)
+    try(p.qty.SetJustifyH, p.qty, "CENTER")
+    p.qty:SetScript("OnTextChanged", function(self, user)
+      if user and w.wiz then
+        local v = tonumber(str(try(self.GetText, self)))
+        if v then w.wiz.qty = math.max(1, math.min(craftsWindow.WIZ_QTY, floor(v))) pcall(craftsWindow.wizSummaryDraw, w) end
+      end
+    end)
+    p.qty:SetScript("OnEditFocusLost", function() setQty(w.wiz and w.wiz.qty or 1) end)
+  end
+  p.plus = ui.button(p, 144, -56, 22, "+", function() setQty((w.wiz and w.wiz.qty or 1) + 1) end, "One more.")
+  p.mats = ui.check(p, 10, -84, "I have mats", function(on)
+    if w.wiz then w.wiz.mats = on pcall(craftsWindow.wizSummaryDraw, w) end
+  end, "You'll send or bring the materials.")
+  p.noteLabel = p:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  p.noteLabel:SetPoint("TOPLEFT", p, "TOPLEFT", 12, -116)
+  p.noteLabel:SetText("Note")
+  p.note = ui.inputBox(p, 16, -132, W - 32, Sync and Sync.NOTE_MAX or 60, "Optional, a few words: crafters see it on the request.", "Note")
+  if p.note then
+    p.note:SetScript("OnTextChanged", function(self, user)
+      if user and w.wiz then w.wiz.note = str(try(self.GetText, self)) end
+    end)
+  end
+  p.summary = p:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+  p.summary:SetPoint("BOTTOMLEFT", p, "BOTTOMLEFT", 12, 40)
+  p.summary:SetWidth(W - 24)
+  p.summary:SetJustifyH("LEFT")
+  -- Back, Next (Send on the last step)
+  p.back = ui.button(p, 10, -(H - 34), 70, "Back", function()
+    local s = w.wiz
+    if s and s.step > 1 then s.step, s.offset = s.step - 1, 0 pcall(craftsWindow.wizDraw, w) end
+  end, "The step before (your choices are kept).")
+  p.next = ui.button(p, W - 112, -(H - 34), 102, "Next", function() pcall(craftsWindow.wizNext, w) end, nil)
+  if p.next then ui.tip(p.next, function() return p.next.label end, function() return p.next.tipText end) end
+  w.wizard = p
+  return p
+end
+
+-- One profession toggle in step 1's row (made as the professions are known).
+function craftsWindow.wizProf(p, i, prof)
+  local b = p.profs[i]
+  if not b then
+    b = ui.toggleIcon(p, 18, function() end, function() return b and b.prof end,
+      function() return b and ("Only " .. str(b.prof) .. " recipes; again for all.") end, function(self)
+      local s = p.w.wiz
+      if not s then return end
+      s.prof = (s.prof ~= self.prof) and self.prof or nil
+      s.offset = 0
+      pcall(craftsWindow.wizDraw, p.w)
+    end)
+    if not b then return nil end
+    b:SetPoint("TOPLEFT", p, "TOPLEFT", 12 + (i - 1) * 19, -74)
+    p.profs[i] = b
+  end
+  b.prof = prof
+  b.icon:SetTexture(craftsWindow.profIcon(prof))
+  return b
+end
+
+function craftsWindow.wizSummaryDraw(w)
+  local p, s = w.wizard, w.wiz
+  if not p or not s then return end
+  local e = s.key and craftsWindow.index().byKey[s.key]
+  p.summary:SetText(s.step == 3 and craftsWindow.wizSummary(s, e) or "")
+end
+
+-- Draws the step the wizard is on.
+function craftsWindow.wizDraw(w)
+  local p, s = w.wizard, w.wiz
+  if not p or not s then return end
+  local idx = craftsWindow.index()
+  local e = s.key and idx.byKey[s.key]
+  if s.key and not e then s.key, s.step = nil, 1 end
+  s.reached = math.max(num(s.reached, 1), s.step)
+  for i, b in ipairs(p.steps) do
+    local color = i == s.step and "NORMAL" or (i <= s.reached and (i == 1 or s.key)) and "HIGHLIGHT" or "GRAY"
+    b.text:SetTextColor(gameColor(color))
+  end
+  local function show(f, on) if f then if on then f:Show() else f:Hide() end end end
+  show(p.search, s.step == 1)
+  for _, b in ipairs(p.profs) do b:Hide() end
+  for _, f in ipairs({ p.qtyLabel, p.minus, p.qty, p.plus, p.mats, p.noteLabel, p.note }) do show(f, s.step == 3) end
+  show(p.nobody, false)
+  local items, top = {}, -96
+  if s.step == 1 then
+    for i, prof in ipairs(idx.profs) do
+      local b = craftsWindow.wizProf(p, i, prof)
+      if b then ui.setToggle(b, s.prof == prof, s.prof ~= nil) b:Show() end
+    end
+    for _, x in ipairs(craftsWindow.wizRecipes(s)) do
+      local x_ = x
+      items[#items + 1] = { icon = recipeIcon(x.e), text = x.name, color = x.e.item and { itemQualityColor(x.e.item) } or nil,
+        right = (x.on and ONLINE_ICON or "") .. x.count, sel = s.key == x.e.key,
+        tipTitle = x.name, tipText = x.count .. (x.count == 1 and " crafter" or " crafters") .. (x.on and ", one online" or ", none online now"),
+        pick = function() s.key = x_.e.key s.to = nil pcall(craftsWindow.wizDraw, w) end }
+    end
+  elseif s.step == 2 then
+    local list = craftsWindow.wizCrafters(e)
+    local anyOn = false
+    for _, c in ipairs(list) do if c.online then anyOn = true end end
+    if s.to then
+      local found = false
+      for _, c in ipairs(list) do if c.name == s.to then found = true end end
+      if not found then s.to = nil end
+    end
+    top = anyOn and -52 or -70
+    show(p.nobody, not anyOn)
+    items[1] = { icon = "Interface\\Icons\\INV_Misc_GroupNeedMore", text = "Anyone who can make it", right = #list .. "",
+      sel = s.to == nil, tipTitle = "Anyone who can make it", tipText = "Every crafter who can make it sees it, and gets a notice.",
+      pick = function() s.to = nil pcall(craftsWindow.wizDraw, w) end }
+    local members = {}
+    local g = initDB().guild
+    for _, m in ipairs(type(g) == "table" and type(g.members) == "table" and g.members or {}) do
+      if type(m) == "table" and m.name then members[m.name] = m end
+    end
+    for _, c in ipairs(list) do
+      local c_ = c
+      local lvl = craftsWindow.level(c.name)
+      local seen = not c.online and members[c.name] and ui.lastSeen and ui.lastSeen(members[c.name].lastOnline) or nil
+      items[#items + 1] = { class = c.class,
+        text = (c.online and ONLINE_ICON or "") .. classHex(c.class) .. c.name .. "|r",
+        right = gameColor("GRAY", true) .. (lvl and (lvl .. " ") or "") .. "|r" .. (num(c.skill, 0) > 0 and c.skill or ""),
+        sel = s.to == c.name, tipTitle = c.name,
+        tipText = (lvl and ("Level " .. lvl) or "") .. (num(c.skill, 0) > 0 and (", skill " .. c.skill) or "")
+          .. (c.online and "\nOnline" or c.via and ("\nOn " .. c.via .. ", online") or seen and ("\n" .. seen) or "\nOffline"),
+        pick = function() s.to = c_.name pcall(craftsWindow.wizDraw, w) end }
+    end
+  end
+  -- the rows
+  local room = math.max(1, floor((p.H + top - 72) / craftsWindow.WIZ_ROW))
+  s.offset = math.max(0, math.min(num(s.offset, 0), #items - room))
+  for i = 1, math.max(room, #p.rows) do
+    local spec = i <= room and items[s.offset + i]
+    local row = (spec or p.rows[i]) and wizRow(p, i)
+    if row then
+      if spec then
+        row:ClearAllPoints()
+        row:SetPoint("TOPLEFT", p, "TOPLEFT", 10, top - (i - 1) * craftsWindow.WIZ_ROW)
+        if spec.class then
+          ui.classTexture(row.icon, spec.class)
+        else
+          row.icon:SetTexture(spec.icon or QUESTION_ICON)
+          try(row.icon.SetTexCoord, row.icon, 0, 1, 0, 1)
+        end
+        row.text:ClearAllPoints()
+        row.text:SetPoint("LEFT", row, "LEFT", 20, 0)
+        row.text:SetWidth(craftsWindow.WIZ_W - 82)
+        row.text:SetText(spec.text)
+        if spec.color then row.text:SetTextColor(spec.color[1], spec.color[2], spec.color[3]) else row.text:SetTextColor(gameColor("HIGHLIGHT")) end
+        row.right:SetText(spec.right or "")
+        if spec.sel then row.sel:Show() else row.sel:Hide() end
+        row.pick, row.tipTitle, row.tipText = spec.pick, spec.tipTitle, spec.tipText
+        row:Show()
+      else
+        row:Hide()
+      end
+    end
+  end
+  p.rowsShown = math.min(room, #items - s.offset)
+  p.items = items
+  -- step 3's boxes; the summary; Back and Next / Send / Update request
+  if s.step == 3 then
+    if p.qty and not try(p.qty.HasFocus, p.qty) then p.qty:SetText(tostring(s.qty)) end
+    if p.mats then p.mats:SetChecked(s.mats and true or false) end
+    if p.note and not try(p.note.HasFocus, p.note) and str(try(p.note.GetText, p.note)) ~= str(s.note) then p.note:SetText(str(s.note)) end
+  end
+  craftsWindow.wizSummaryDraw(w)
+  if p.back then try(s.step > 1 and p.back.Enable or p.back.Disable, p.back) end
+  if p.next then
+    local updating = s.step == 3 and craftsWindow.myRequest(s.key) ~= nil
+    local label = s.step < 3 and "Next" or updating and "Update request" or "Send"
+    if p.next.text and not p.next.GetFontString then p.next.text:SetText(label) else try(p.next.SetText, p.next, label) end
+    p.next.label = label
+    p.next.tipText = s.step == 1 and "Pick a recipe, then on to who makes it." or s.step == 2 and "On to how many and a note."
+      or updating and "Change your request for it: how many, mats, note, and who." or "Ask for it."
+    try((s.step == 1 and not s.key) and p.next.Disable or p.next.Enable, p.next)
+  end
+end
+
+function craftsWindow.wizNext(w)
+  local s = w.wiz
+  if not s then return end
+  if s.step < 3 then
+    if s.step == 1 and not s.key then return end
+    s.step, s.offset = s.step + 1, 0
+    return craftsWindow.wizDraw(w)
+  end
+  local e = s.key and craftsWindow.index().byKey[s.key]
+  if not e then return end
+  local ok, id = asks.request(e, s.qty, s.mats, s.note, s.to)
+  if not ok then return end
+  w.wizard:Hide()
+  w.wiz = nil
+  w.master = asks.REQ
+  ui.state()[w.masterKey] = asks.REQ
+  w.reqPick, w.keepPick = "req:" .. id, true
+  pcall(ui.render, w)
+end
+
+-- Opens the wizard: on step 1, or with a recipe picked on step 2 (from a recipe's Request button). Your request
+-- for that recipe, if any, fills in its details.
+function craftsWindow.openWizard(w, e)
+  local p = craftsWindow.wizMake(w)
+  if not p then return end
+  local s = { step = 1, reached = 1, qty = 1, mats = false, note = "", offset = 0, search = "" }
+  if e then
+    s.key, s.step, s.reached = e.key, 2, 2
+    local _, r = craftsWindow.myRequest(e.key)
+    if r then s.qty, s.mats, s.note, s.to = num(r.qty, 1), r.mats and true or false, str(r.note), r.to end
+  end
+  w.wiz = s
+  if p.search then p.search:SetText("") end
+  p:ClearAllPoints()
+  p:SetPoint("TOPLEFT", w.frame, "TOPLEFT", w.detail and w.detail.x - 6 or 0, -2)
+  p:Show()
+  craftsWindow.wizDraw(w)
+end
+
+-- The old name, for the recipe's Request button.
+craftsWindow.openForm = function(w, e) return craftsWindow.openWizard(w, e) end
 
 refreshWindows = function()
   ui.crafts = nil -- the data changed: rebuild the recipe index
@@ -4128,6 +4533,8 @@ function guildView.fill(w, row, c)
 end
 
 -- "today", "3 days ago": the roster counts whole days.
+function ui.lastSeen(days) return guildView.lastSeen(days) end
+
 function guildView.lastSeen(days)
   days = num(days, -1)
   if days < 0 then return nil end
@@ -5200,7 +5607,7 @@ function asks.alert(id, r)
     if type(st[k]) ~= "table" then st[k] = {} end
   end
   local kind
-  if r.state == "open" and not asks.mine(r) and asks.keys()[r.key] then
+  if r.state == "open" and not asks.mine(r) and asks.keys()[r.key] and (not r.to or initDB().characters[r.to]) then
     if st.requestsTold[id] == r.created then return end
     kind = "new"
   elseif asks.mine(r) and r.claimer and (r.state == "claimed" or r.state == "done") then
