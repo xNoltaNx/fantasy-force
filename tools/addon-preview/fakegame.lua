@@ -1042,6 +1042,9 @@ function FakeGame.pressEscape(client)
   end
   for _, n in ipairs(client.env.UISpecialFrames) do
     local f = client.env[n]
+    if type(f) ~= "table" then
+      for _, x in pairs(client.frames) do if x._name == n then f = x end end
+    end
     if type(f) == "table" and f.IsShown and f:IsShown() then
       f:Hide()
       closed = true
@@ -1083,7 +1086,6 @@ function FakeGame.tainted(client)
   for k, fn in pairs(client.gameFns) do
     if now[k] ~= fn then out[#out + 1] = "the game's " .. k .. " replaced" end
   end
-  if #env.UISpecialFrames > 0 then out[#out + 1] = "UISpecialFrames written to" end
   return out
 end
 

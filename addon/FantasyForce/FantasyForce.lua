@@ -1875,24 +1875,15 @@ function ui.makeChrome(key, title, width, height, portrait)
   else
     f:SetPoint("CENTER", UIParent, "CENTER", 0, 40)
   end
-  -- Escape closes it: the window takes that one key itself (adding it to the game's UISpecialFrames list
-  -- would write into a table the game's own code reads). Other keys go on to the game; in combat the
-  -- game won't let it keep a key, so Escape closes it and goes on too.
-  try(f.EnableKeyboard, f, true)
-  try(f.SetPropagateKeyboardInput, f, true)
-  f:SetScript("OnKeyDown", function(self, key)
-    local fight = try(InCombatLockdown) and true or false
-    if key == "ESCAPE" then
-      if not fight then try(self.SetPropagateKeyboardInput, self, false) end
-      self:Hide()
-      -- put back next frame, unless a fight began in between (then it's put back on the next key out of combat)
-      if not fight then after(0, function()
-        if not try(InCombatLockdown) then try(self.SetPropagateKeyboardInput, self, true) end
-      end) end
-    elseif not fight then
-      try(self.SetPropagateKeyboardInput, self, true)
-    end
-  end)
+  -- Escape closes it the way every addon window does: its name in the game's UISpecialFrames list. The window
+  -- never takes the keyboard: taking it to catch Escape (EnableKeyboard + SetPropagateKeyboardInput, which this
+  -- client won't let addons set) swallowed every key while the window was open (the Director, 8 Nov: "why
+  -- does the addon eat my input?").
+  if type(UISpecialFrames) == "table" and f:GetName() then
+    local listed = false
+    for _, n in ipairs(UISpecialFrames) do if n == f:GetName() then listed = true end end
+    if not listed then pcall(table.insert, UISpecialFrames, f:GetName()) end
+  end
   -- the template's own title when it has one, else the game's large gold font in the title bar
   if not (type(f.SetTitle) == "function" and pcall(f.SetTitle, f, title)) then
     local t = (f.TitleContainer and f.TitleContainer.TitleText) or f.TitleText
