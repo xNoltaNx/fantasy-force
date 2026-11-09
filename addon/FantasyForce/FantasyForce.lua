@@ -9,7 +9,8 @@
 -- Plain Lua 5.1; every API call is guarded so a missing function never errors.
 
 local ADDON = "FantasyForce"
-local SITE_URL = "https://xnoltanx.github.io/fantasy-force/" -- the guild website, shown on the Website tab
+-- The guild website's My characters page, where the file is uploaded: shown on the Website tab.
+local SITE_URL = "https://xnoltanx.github.io/fantasy-force/#/me"
 local _, ns = ...
 local Sync = type(ns) == "table" and ns.Sync or nil
 local DB_VERSION = 1
@@ -3522,8 +3523,9 @@ function ui.makeSite(page, width, height)
     "The file to upload. Ctrl+C copies. Your account folder is the only one in WTF\\Account, or the one named after your account.")
   if s.path then s.path.setValue(FILE_PATH) end
   line(14, -74, 16, "GameFontNormal"):SetText("3")
-  line(34, -76, 150):SetText("Drop it on My characters")
-  s.address = ui.copyBox(page, 190, -70, width - 202, "The guild website. Ctrl+C copies.")
+  line(34, -76, 150):SetText("Upload it here")
+  s.address = ui.copyBox(page, 190, -70, width - 202,
+    "Ctrl+C copies. Open it in your browser and drag the file onto the box on My characters.")
   if s.address then s.address.setValue(SITE_URL) end
   s.officer = line(34, -100, width - 60, "GameFontDisableSmall")
   local h = page:CreateFontString(nil, "OVERLAY", "GameFontNormal")
