@@ -42,5 +42,6 @@ jobs:
           ref=$(echo "$SUPABASE_URL" | sed -E 's#^https://([a-z0-9]+)\.supabase\.co.*#\1#')
           if [ -z "$ref" ] || [ "$ref" = "$SUPABASE_URL" ]; then echo "::error::Set the SUPABASE_URL repository variable (https://<project>.supabase.co)."; exit 1; fi
           # Discord signs its own requests and the database sends its secret, so Supabase's sign-in check is off for both.
-          supabase functions deploy discord-interactions --project-ref "$ref" --no-verify-jwt
-          supabase functions deploy discord-announce --project-ref "$ref" --no-verify-jwt
+          # --yes: the CLI asks before deploying and a workflow can't answer.
+          supabase functions deploy discord-interactions --project-ref "$ref" --no-verify-jwt --yes
+          supabase functions deploy discord-announce --project-ref "$ref" --no-verify-jwt --yes
