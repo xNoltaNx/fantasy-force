@@ -62,3 +62,9 @@ export function allTimeZones(): string[] {
 export function myTimeZone(): string {
   return Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
 }
+
+/** A new member starts on UTC: the first time they sign in, their browser's zone replaces it (once per device,
+ *  so someone who picks UTC on purpose keeps it). Null: nothing to change. */
+export function zoneToAdopt(current: string, browser: string, adoptedBefore: boolean): string | null {
+  return !adoptedBefore && current === 'UTC' && browser && browser !== 'UTC' ? browser : null
+}

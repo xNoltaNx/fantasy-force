@@ -1,5 +1,14 @@
 import { describe, expect, it } from 'vitest'
-import { bestTimes, localCellToUtcSlot, localGrid } from './week'
+import { bestTimes, localCellToUtcSlot, localGrid, zoneToAdopt } from './week'
+
+describe('zoneToAdopt', () => {
+  it('takes the browser\'s time zone over the UTC a new member starts with, once', () => {
+    expect(zoneToAdopt('UTC', 'America/Los_Angeles', false)).toBe('America/Los_Angeles')
+    expect(zoneToAdopt('UTC', 'America/Los_Angeles', true)).toBeNull() // adopted before: a later UTC was picked on purpose
+    expect(zoneToAdopt('Europe/Berlin', 'America/Los_Angeles', false)).toBeNull() // one already chosen stays
+    expect(zoneToAdopt('UTC', 'UTC', false)).toBeNull()
+  })
+})
 
 describe('week', () => {
   it('maps every local cell to a distinct UTC slot', () => {

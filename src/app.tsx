@@ -1,6 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useState } from 'react'
 import type { GuildData, Viewer } from './types'
 import { store } from './store'
+import { myTimeZone, zoneToAdopt } from './week'
 
 interface AppState {
   data: GuildData
@@ -24,6 +25,15 @@ export function AppProvider({ children }: { children: (s: AppState | null, error
   const reload = useCallback(async () => {
     try {
       const [viewer, data] = await Promise.all([store.viewer(), store.load()])
+      const m = viewer?.member
+      const flag = m ? `guild-roster-zone-adopted-${m.id}` : ''
+      const zone = m ? zoneToAdopt(m.timezone, myTimeZone(), localStorage.getItem(flag) === '1') : null
+      if (m && zone) {
+        localStorage.setItem(flag, '1')
+        await store.updateMember(m.id, { timezone: zone })
+        return void (await reload())
+      }
+      if (flag) localStorage.setItem(flag, '1')
       setState({ data, viewer })
       setError(null)
     } catch (e) {
