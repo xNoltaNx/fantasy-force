@@ -4,7 +4,7 @@
 -- Shares the bank and every member's crafting with guildmates who run the addon (guild addon
 -- messages, format in Sync.lua). Shares each account's mains and alts too, shown in front of guild
 -- chat lines and on unit tooltips. /ff opens one window (and the minimap button toggles it) with
--- tabs Bank, Crafting, Guild, KOS, Website and Options; kill-on-sight marks are shared like the rest; every command is in COMMANDS (/ff help).
+-- tabs Bank, Crafting, Guild, PvP, Website and Options; kill-on-sight marks are shared like the rest; every command is in COMMANDS (/ff help).
 -- Accents (/accent, /troll) live in Accent.lua and AccentChat.lua.
 -- Plain Lua 5.1; every API call is guarded so a missing function never errors.
 
@@ -1485,7 +1485,7 @@ end
 
 -- Kill on sight: guildmates mark enemy players (K payloads, rules in Sync.lua), kept in FantasyForceDB.kos by
 -- lower-case name, everyone's, so anyone online passes them on to whoever logs in later. Anyone in the guild
--- may mark or clear. What shows them (the target frame's badge, nameplates, tooltips, the KOS tab, the
+-- may mark or clear. What shows them (the target frame's badge, nameplates, tooltips, the PvP tab, the
 -- attacked-by notice) is in the kill-on-sight section further down.
 local kos = { attackers = {}, seen = {}, told = {}, offered = {} }
 
@@ -4931,7 +4931,8 @@ local COMMANDS = {
   { "/ff bank", "Guild bank" },
   { "/ff crafts", "Who can make what" },
   { "/ff guild", "Guildmates and their alts" },
-  { "/ff kos", "Mark your target kill on sight (no target: the KOS list)" },
+  { "/ff pvp", "Who attacked you, and the kill-on-sight list" },
+  { "/ff kos", "Mark your target kill on sight (no target: the PvP tab)" },
   { "/ff kos last", "Mark the last enemy player who attacked you" },
   { "/ff kos <name>", "Mark a player by name; add \" - why\" for a reason" },
   { "/ff kos clear <name>", "Clear a mark (no name: your target's)" },
@@ -4982,7 +4983,7 @@ end
 -- state. Each returns the line the command prints; controls print nothing.
 
 local cmd = {}
--- the KOS tab: kill-on-sight marks and who attacked you (filled in the kill-on-sight section)
+-- the PvP tab: kill-on-sight marks and who attacked you (filled in the kill-on-sight section)
 local kosView = { key = "Kos", nameWidth = 260, noFilters = true, rightClick = true, searchWidth = 200,
   emptyWidth = 420 }
 -- TOP: where the pages start, below the title bar and the portrait (nothing sits under the portrait), as in
@@ -4991,7 +4992,7 @@ local panel = { pages = {}, tabs = {}, W = 760, H = 528, TOP = -62,
   views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView, Kos = kosView },
   ICON = "Interface\\AddOns\\FantasyForce\\Media\\Icon",
   TABS = { { key = "Bank", label = "Bank" }, { key = "Crafts", label = "Crafting" }, { key = "Guild", label = "Guild" },
-    { key = "Kos", label = "KOS" }, { key = "Site", label = "Website" }, { key = "Options", label = "Options" } } }
+    { key = "Kos", label = "PvP" }, { key = "Site", label = "Website" }, { key = "Options", label = "Options" } } }
 
 -- Something a control shows changed (by a command, a control or the game): show it.
 function ui.changed()
@@ -5449,7 +5450,11 @@ function panel.makeTabs(f)
       else
         tab:SetPoint("TOPLEFT", f, "BOTTOMLEFT", 12, style == "plain" and -2 or 2)
       end
-      tab:SetScript("OnClick", function() pcall(panel.select, t.key) end)
+      tab:SetScript("OnClick", function()
+        -- the game's tab click, as its own windows' tabs make (only when it changes the page)
+        if t.key ~= panel.current then panel.sound("IG_CHARACTER_INFO_TAB", 841) end
+        pcall(panel.select, t.key)
+      end)
       panel.tabs[i] = tab
       prev = tab
     end
@@ -5573,8 +5578,23 @@ function panel.make()
 
   panel.makeTabs(f)
   pcall(asks.badges)
-  f:SetScript("OnShow", function() pcall(panel.refresh) end)
+  -- the game's own window sounds (the character window's), however it opens or closes: /ff, the minimap button,
+  -- Escape, the X
+  f:SetScript("OnShow", function()
+    panel.sound("IG_CHARACTER_INFO_OPEN", 839)
+    pcall(panel.refresh)
+  end)
+  f:SetScript("OnHide", function()
+    panel.sound("IG_CHARACTER_INFO_CLOSE", 840)
+    hideTooltip()
+  end)
   return true
+end
+
+-- A game sound by its SOUNDKIT name (its usual id when this client's SOUNDKIT lacks it).
+function panel.sound(name, id)
+  local kit = type(SOUNDKIT) == "table" and SOUNDKIT[name] or id
+  try(PlaySound, kit, "SFX")
 end
 
 function panel.select(key)
@@ -6004,7 +6024,9 @@ kos.TOAST_SECONDS = 20
 -- challenge is declined or runs out, so the duel is forgotten after this whatever happens
 kos.DUEL_SECONDS = 180
 kos.RED = "|cffff3030"
-kos.frames, kos.plates = {}, {}
+kos.frames = {}
+-- our badge per nameplate, kept here: a field written onto one of the game's nameplate frames taints it
+kos.plates = setmetatable({}, { __mode = "k" })
 
 function kos.alertsOn() return initDB().kosAlerts ~= false end
 
@@ -6155,17 +6177,72 @@ end
 
 kos.UNIT_FRAMES = { target = "TargetFrame", focus = "FocusFrame" }
 
+-- The mark button: a small faded skull on the portrait's ring, where the badge goes, while an enemy player who
+-- isn't marked is targeted; click it to mark them (it then turns into the badge). Our own plain button, so it
+-- works in combat too.
+function kos.makeMarkButton(host, unit, size)
+  local b = newFrame("Button", nil, host)
+  if not b then return nil end
+  b:SetSize(size, size)
+  try(b.SetFrameLevel, b, num(try(host.GetFrameLevel, host), 1) + 10)
+  local ring = b:CreateTexture(nil, "BACKGROUND")
+  ring:SetPoint("CENTER", b, "CENTER", 0, 0)
+  ring:SetSize(size + 4, size + 4)
+  ring:SetTexture("Interface\\CharacterFrame\\TempPortraitAlphaMask")
+  try(ring.SetVertexColor, ring, 0, 0, 0, 0.8)
+  b.icon = b:CreateTexture(nil, "ARTWORK")
+  b.icon:SetAllPoints()
+  b.icon:SetTexture(kos.ICON)
+  try(b.icon.SetDesaturated, b.icon, true)
+  try(b.icon.SetAlpha, b.icon, 0.75)
+  b:SetScript("OnEnter", function(self)
+    try(self.icon.SetDesaturated, self.icon, false)
+    try(self.icon.SetAlpha, self.icon, 1)
+    local tt = GameTooltip
+    if not tt then return end
+    local info = kos.unitInfo(unit)
+    try(tt.SetOwner, tt, self, "ANCHOR_RIGHT")
+    try(tt.SetText, tt, "Mark kill on sight", 1, 0.19, 0.19)
+    try(tt.AddLine, tt, (info and info.name or "Them") .. " gets the skull for everyone in the guild with the addon.",
+      gameColor("HIGHLIGHT"))
+    try(tt.Show, tt)
+  end)
+  b:SetScript("OnLeave", function(self)
+    try(self.icon.SetDesaturated, self.icon, true)
+    try(self.icon.SetAlpha, self.icon, 0.75)
+    hideTooltip()
+  end)
+  b:SetScript("OnClick", function()
+    pcall(function()
+      local info = kos.unitInfo(unit)
+      if info then print_(kos.markInfo(info)) end
+    end)
+    hideTooltip()
+  end)
+  b:Hide()
+  return b
+end
+
 function kos.updateUnit(unit)
   local b = kos.frames[unit]
   if b == nil then
     local host = _G[kos.UNIT_FRAMES[unit] or ""]
     b = type(host) == "table" and kos.makeBadge(host, 28) or false
-    if b then b:SetPoint("CENTER", kos.portraitOf(host), "TOPLEFT", 6, -6) end
+    if b then
+      local portrait = kos.portraitOf(host)
+      b:SetPoint("CENTER", portrait, "TOPLEFT", 6, -6)
+      b.markButton = kos.makeMarkButton(host, unit, 20)
+      if b.markButton then b.markButton:SetPoint("CENTER", portrait, "TOPLEFT", 6, -6) end
+    end
     kos.frames[unit] = b
   end
   local k, info = kos.forUnit(unit)
   if b then
     if k then b:Show() else b:Hide() end
+    local mb = b.markButton
+    if mb then
+      if not k and info and info.hostile and not kos.refuse(info) then mb:Show() else mb:Hide() end
+    end
   end
   if k then kos.spotted(k, info) end
 end
@@ -6182,7 +6259,7 @@ function kos.plateAdded(unit)
   local plate = kos.plateFor(unit)
   if not plate then return end
   local k, info = kos.forUnit(unit)
-  local b = plate.ffKos
+  local b = kos.plates[plate]
   if not k then
     if b then b:Hide() end
     return
@@ -6191,7 +6268,7 @@ function kos.plateAdded(unit)
     b = kos.makeBadge(plate, 26)
     if not b then return end
     b:SetPoint("BOTTOM", plate, "TOP", 0, 0)
-    plate.ffKos = b
+    kos.plates[plate] = b
   end
   b:Show()
   kos.spotted(k, info)
@@ -6199,7 +6276,7 @@ end
 
 function kos.plateRemoved(unit)
   local plate = kos.plateFor(unit)
-  if plate and plate.ffKos then plate.ffKos:Hide() end
+  if plate and kos.plates[plate] then kos.plates[plate]:Hide() end
 end
 
 -- Every nameplate's unit token now shown.
@@ -6492,7 +6569,7 @@ function kos.command(rest)
   return kos.markInfo({ name = kos.capitalize(text) }, reason)
 end
 
--- The key binding: marks the target (cleared with the command or the KOS tab).
+-- The key binding: marks the target (cleared with the command or the PvP tab).
 function FantasyForce_MarkTarget()
   pcall(function()
     print_(kos.markTarget())
@@ -6522,7 +6599,7 @@ function kos.hookMenus()
   end
 end
 
--- ------------------------------------------------------------- the KOS tab --
+-- ------------------------------------------------------------- the PvP tab --
 -- Who attacked you this session and isn't marked (click to mark), then everyone marked, newest first.
 
 -- The marks in force matching a search, newest first.
@@ -6636,8 +6713,14 @@ kos.events = CreateFrame and CreateFrame("Frame") or nil
 if kos.events then
   local ev = kos.events
   for _, e in ipairs({ "PLAYER_LOGIN", "PLAYER_TARGET_CHANGED", "PLAYER_FOCUS_CHANGED", "NAME_PLATE_UNIT_ADDED",
-    "NAME_PLATE_UNIT_REMOVED", "COMBAT_LOG_EVENT_UNFILTERED", "PLAYER_DEAD", "DUEL_REQUESTED", "DUEL_FINISHED" }) do
+    "NAME_PLATE_UNIT_REMOVED", "PLAYER_DEAD", "DUEL_REQUESTED", "DUEL_FINISHED" }) do
     pcall(ev.RegisterEvent, ev, e)
+  end
+  -- The combat log, only on a game that still lets addons read it. The newer engine (the one with secret values,
+  -- issecretvalue) forbids it, and asking for it there brings up the game's "blocked from an action only available
+  -- to the Blizzard UI" box at login; there attackers are found the other way (kos.hurt).
+  if type(issecretvalue) ~= "function" and type(CombatLogGetCurrentEventInfo) == "function" then
+    pcall(ev.RegisterEvent, ev, "COMBAT_LOG_EVENT_UNFILTERED")
   end
   -- the player's own hits only, where the client can filter by unit
   if not (ev.RegisterUnitEvent and pcall(ev.RegisterUnitEvent, ev, "UNIT_COMBAT", "player")) then
@@ -6800,7 +6883,7 @@ end
 
 -- /ff words that open the window on a tab.
 local TAB_COMMANDS = { bank = "Bank", crafts = "Crafts", craft = "Crafts", crafting = "Crafts", guild = "Guild",
-  site = "Site", website = "Site", options = "Options" }
+  site = "Site", website = "Site", options = "Options", pvp = "Kos" }
 
 -- Registered the standard way: our own SLASH_ name and one new key in the game's SlashCmdList. Never assign
 -- the SlashCmdList global itself (SlashCmdList = SlashCmdList or {}): that taints every read of it by the

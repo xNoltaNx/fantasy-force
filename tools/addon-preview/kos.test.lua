@@ -5,6 +5,7 @@ local FakeGame = assert(load(FAKEGAME_SRC, "@fakegame.lua", "t"))()
 local SOURCES = {}
 for i, name in ipairs(ADDON_FILES) do SOURCES[i] = { name = name, src = ADDON_SOURCES[i] } end
 bit = { band = function(a, b) return a & b end } -- the game's bit library
+CombatLogGetCurrentEventInfo = function() return nil end -- an older engine's combat log (each test sets what it says)
 
 local now = 1793000000
 local timers = {}
@@ -91,6 +92,14 @@ for _, c in ipairs(clients) do
 end
 run(30)
 local S = A.ns.Sync
+
+-- the newer engine (secret values) forbids addons the combat log: there it's never asked for
+check(A.ns.ff.kos.events._events.COMBAT_LOG_EVENT_UNFILTERED, "an older engine's combat log is read")
+issecretvalue = function() return false end
+local N = FakeGame.newClient({ name = "Newer Engine", class = "MAGE", sources = SOURCES, db = {}, charDB = {},
+  time = function() return now end, now = function() return now end, after = after, roster = function() return ROSTER end })
+issecretvalue = nil
+check(not N.ns.ff.kos.events._events.COMBAT_LOG_EVENT_UNFILTERED, "the newer engine's combat log is left alone")
 local kosA, kosB = A.ns.ff.kos, B.ns.ff.kos
 
 -- ------------------------------------------------------------ the format --
@@ -124,6 +133,14 @@ local SHIFTY = { name = "Itz Shifty", class = "DRUID", race = "Night Elf", level
 setTarget(A, SHIFTY)
 A.fire("PLAYER_TARGET_CHANGED")
 check(not shown(kosA.frames.target), "no badge before he's marked")
+local markButton = kosA.frames.target.markButton
+check(shown(markButton), "an unmarked enemy gets the mark button on the portrait")
+FakeGame.click(A, markButton)
+check(A.db().kos["itz shifty"].state == "kos" and not shown(markButton) and shown(kosA.frames.target),
+  "clicking it marks them: the button goes, the badge shows")
+A.slash("kos clear")
+check(A.db().kos["itz shifty"].state == "cleared" and shown(markButton) and not shown(kosA.frames.target),
+  "cleared: the button is back")
 A.slash("kos - ganks lowbies at the crossroads")
 local k = A.db().kos["itz shifty"]
 check(k and k.state == "kos" and k.reason == "ganks lowbies at the crossroads" and k.class == "DRUID" and k.level == 32
@@ -216,11 +233,32 @@ setTarget(A, nil)
 A.fire("PLAYER_TARGET_CHANGED")
 A.slash("kos")
 local view = A.ns.ff.views.Kos
-check(A.ns.ff.panel.current == "Kos", "/ff kos without a target opens the KOS tab")
+check(A.ns.ff.panel.current == "Kos", "/ff kos without a target opens the PvP tab")
+check(A.ns.ff.panel.tabs[4].Text and A.ns.ff.panel.tabs[4].Text._text == "PvP" or A.ns.ff.panel.tabs[4]._text == "PvP", "labelled PvP")
+A.slash("guild") A.slash("pvp")
+check(A.ns.ff.panel.current == "Kos", "/ff pvp opens it too")
 local names = {}
 for _, d in ipairs(view.items) do names[#names + 1] = d.header or (d.mark and d.mark.name) or (d.attacker and d.attacker.name) end
 check(table.concat(names, ",") == "Attacked you,Duelo Fireborn,Kill on sight,Bob Loblaw,Sneaky Stabsworth,Itz Shifty"
   or table.concat(names, ",") == "Attacked you,Duelo Fireborn,Kill on sight,Sneaky Stabsworth,Bob Loblaw,Itz Shifty", "it lists the marks: " .. table.concat(names, ","))
+
+-- ------------------------------------------- the window's open and close sounds --
+local heard = #A.sounds
+A.slash("")
+check(not A.ns.ff.panel.frame:IsShown() and A.sounds[heard + 1] == 840, "closing the window plays the close sound")
+A.slash("kos")
+check(A.ns.ff.panel.frame:IsShown() and A.sounds[heard + 2] == 839, "opening it plays the open sound")
+FakeGame.pressEscape(A)
+check(A.sounds[heard + 3] == 840 and #A.sounds == heard + 3, "Escape too, once")
+A.slash("kos")
+local tabs = A.ns.ff.panel.tabs
+heard = #A.sounds
+FakeGame.click(A, tabs[1])
+check(A.ns.ff.panel.current == "Bank" and A.sounds[heard + 1] == 841, "switching tabs clicks")
+FakeGame.click(A, tabs[1])
+check(#A.sounds == heard + 1, "but not a click on the tab already showing")
+FakeGame.click(A, tabs[4])
+check(A.ns.ff.panel.current == "Kos", "back on the KOS tab")
 
 -- ---------------------------------------------------------- clearing --
 B.slash("kos clear itz shifty")
