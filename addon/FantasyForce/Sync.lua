@@ -14,12 +14,16 @@
 --        tab  = name;item;item...   item = itemId[:count] (count left out when 1)
 --   A  one account's characters in the guild (subject = the account's random id):  main~char~char...
 --        char = name;class;level;prof;prof...   prof = name:skill
---   R  a request (subject = the asker):     bankUpdated~name:updated;...~accountId:updated;...~requestId:updated;...
---        "send me anything newer than these" (the account and craft request lists came later: older
---        readers skip them, and an R without the craft request list gets no craft requests back)
+--   R  a request (subject = the asker):
+--        bankUpdated~name:updated;...~accountId:updated;...~requestId:updated;...~kosKey:updated;...
+--        "send me anything newer than these" (the account, craft request and kill-on-sight lists came later:
+--        older readers skip them, and an R without one of those lists gets none of that kind back)
 --   Q  a craft request (subject = its id, asker@recipeKey):  qty~mats~state~claimer~created~class~item~name~note
 --        state o (open), c (claimed), d (done), x (cancelled); name only when the key has no id; the note
 --        last, cut so the whole request fits in one message
+--   K  a kill-on-sight mark (subject = the marked player's name):  state~by~added~class~race~level~guild~guid~reason
+--        state k (kill on sight) or x (cleared, kept a while so a late copy can't bring it back); the reason
+--        last, cut so the whole mark fits in one message
 -- Numbers are base 36. Names are escaped (%XX) wherever they hold a separator, "%", "|" or a control
 -- character. Receivers ignore a protocol digit they don't know and fields past the ones they read.
 
@@ -248,16 +252,19 @@ local function decodeStamps(field)
 end
 
 -- stamps = { [characterName] = updated }, accounts = { [accountId] = updated }, requests = { [requestId] = updated }
-function S.encodeRequest(bankUpdated, stamps, accounts, requests)
+-- kos = { [kosKey] = updated } (kill-on-sight marks, by S.kosKey of the name)
+function S.encodeRequest(bankUpdated, stamps, accounts, requests, kos)
   return S.b36(bankUpdated) .. "~" .. encodeStamps(stamps) .. "~" .. encodeStamps(accounts) .. "~" .. encodeStamps(requests)
+    .. "~" .. encodeStamps(kos)
 end
 
--- requests is nil when the asker's addon doesn't know craft requests (it sent no fourth field).
+-- requests is nil when the asker's addon doesn't know craft requests (it sent no fourth field), kos when it
+-- doesn't know kill-on-sight marks (no fifth).
 function S.decodeRequest(body)
   if type(body) ~= "string" then return nil end
   local parts = split(body, "~")
   return { bank = S.unb36(parts[1]) or 0, crafters = decodeStamps(parts[2]), accounts = decodeStamps(parts[3]),
-    requests = parts[4] and decodeStamps(parts[4]) or nil }
+    requests = parts[4] and decodeStamps(parts[4]) or nil, kos = parts[5] and decodeStamps(parts[5]) or nil }
 end
 
 -- ---------------------------------------------------------------- accounts --
@@ -641,6 +648,135 @@ function S.craftRequestView(reqs, now, names, keys)
   sort(v.taken, newest)
   sort(v.mine, newest)
   return v
+end
+
+-- ----------------------------------------------------------- kill on sight --
+-- Guildmates mark enemy players to be killed on sight. One mark per player, kept by the lower-case name
+-- (S.kosKey). The newest `updated` wins, a clear included, so a cleared mark stays cleared until someone marks
+-- the player again. Cleared marks are dropped 30 days after they were cleared; marks themselves never expire.
+-- mark = { name, state = "kos" | "cleared", by, added, class, race, level, guild, guid, reason, updated }
+
+S.KOS_CLEARED_KEEP = 30 * 86400
+S.KOS_NAME_MAX = 48
+local KOS_DETAILS = { "class", "race", "level", "guild", "guid" }
+
+-- A player's name as it's kept: no links or colours, single spaces, trimmed, at most KOS_NAME_MAX bytes.
+function S.cleanKosName(s)
+  s = tostring(s or ""):gsub("|", ""):gsub("[%c~]", " "):gsub("%s+", " "):gsub("^ ", ""):gsub(" $", "")
+  if #s > S.KOS_NAME_MAX then
+    s = strsub(s, 1, S.KOS_NAME_MAX + 1)
+    s = dropLastLetter(s)
+  end
+  return s
+end
+
+function S.kosKey(name)
+  return S.cleanKosName(name):lower()
+end
+
+-- The body of a mark as of k.updated; the reason is cut (by whole letters) so it all fits in one message.
+function S.encodeKos(k)
+  local name = S.cleanKosName(k.name)
+  local head = concat({ k.state == "cleared" and "x" or "k", S.esc(k.by or ""), S.b36(k.added), S.esc(k.class or ""),
+    S.esc(k.race or ""), S.b36(k.level), S.esc(k.guild or ""), S.esc(k.guid or "") }, "~") .. "~"
+  local room = S.MAX_MESSAGE - #header("K", name, k.updated, 1, 1)
+  local reason = S.cleanNote(k.reason)
+  local body = head .. S.esc(reason)
+  while #body > room and reason ~= "" do
+    reason = dropLastLetter(reason)
+    body = head .. S.esc(reason)
+  end
+  return body
+end
+
+function S.decodeKos(name, updated, body)
+  name = S.cleanKosName(name)
+  if name == "" or type(body) ~= "string" then return nil end
+  local f = split(body, "~")
+  local state = (f[1] == "k" and "kos") or (f[1] == "x" and "cleared") or nil
+  if not state then return nil end
+  local function opt(v)
+    if not v or v == "" then return nil end
+    return S.unesc(v)
+  end
+  local level = S.unb36(f[6])
+  updated = tonumber(updated) or 0
+  return { name = name, state = state, by = opt(f[2]), added = S.unb36(f[3]) or updated, class = opt(f[4]),
+    race = opt(f[5]), level = (level and level > 0) and level or nil, guild = opt(f[7]), guid = opt(f[8]),
+    reason = f[9] and S.cleanNote(S.unesc(f[9])) or "", updated = updated }
+end
+
+-- Keeps a mark when it's newer than what's there. Details the newer copy lacks (a mark typed by name, the player
+-- never seen) are kept from the older one. Returns true when it replaced what was there.
+function S.storeKos(marks, k, now, from)
+  if type(k) ~= "table" then return false end
+  local key = S.kosKey(k.name)
+  if key == "" then return false end
+  local updated = tonumber(k.updated) or 0
+  local old = marks[key]
+  if type(old) == "table" and (tonumber(old.updated) or 0) >= updated then return false end
+  if k.state == "cleared" and updated + S.KOS_CLEARED_KEEP <= (tonumber(now) or 0) then return false end
+  if type(old) == "table" then
+    for _, f in ipairs(KOS_DETAILS) do
+      if k[f] == nil then k[f] = old[f] end
+    end
+  end
+  k.from, k.heard = from, now
+  marks[key] = k
+  return true
+end
+
+-- Drops cleared marks 30 days after they were cleared, and anything that isn't a mark.
+function S.pruneKos(marks, now)
+  for key, k in pairs(marks) do
+    if type(k) ~= "table" or (k.state ~= "kos" and k.state ~= "cleared")
+      or (k.state == "cleared" and (tonumber(k.updated) or 0) + S.KOS_CLEARED_KEEP <= now) then
+      marks[key] = nil
+    end
+  end
+end
+
+-- Lookups for the marks in force: by key, by GUID, and by first word (for a game that gives a first name alone).
+function S.kosIndex(marks)
+  local idx = { byKey = {}, byGuid = {}, byFirst = {}, count = 0 }
+  for key, k in pairs(marks or {}) do
+    if type(k) == "table" and k.state == "kos" then
+      idx.byKey[key] = k
+      idx.count = idx.count + 1
+      if k.guid then idx.byGuid[k.guid] = k end
+      local first = key:match("^(%S+) ")
+      if first then
+        local list = idx.byFirst[first] or {}
+        list[#list + 1] = k
+        idx.byFirst[first] = list
+      end
+    end
+  end
+  return idx
+end
+
+-- The mark for a player seen in the game, or nil: by GUID; else by name (not when both GUIDs are known and
+-- differ: another player of that name); else, for a first name alone, the only mark whose first word it is
+-- (class and GUID agreeing where both are known).
+function S.findKos(idx, name, class, guid)
+  if type(idx) ~= "table" then return nil end
+  if guid and idx.byGuid[guid] then return idx.byGuid[guid] end
+  local key = S.kosKey(name)
+  if key == "" then return nil end
+  local k = idx.byKey[key]
+  if k then
+    if guid and k.guid and k.guid ~= guid then return nil end
+    return k
+  end
+  if key:find(" ", 1, true) then return nil end
+  local found
+  for _, c in ipairs(idx.byFirst[key] or {}) do
+    if not (class and c.class and c.class ~= class) and not (guid and c.guid and c.guid ~= guid) then
+      if found then return nil end
+      found = c
+    end
+  end
+  return found
 end
 
 -- ---------------------------------------------------------------- storing --

@@ -4,7 +4,7 @@
 -- Shares the bank and every member's crafting with guildmates who run the addon (guild addon
 -- messages, format in Sync.lua). Shares each account's mains and alts too, shown in front of guild
 -- chat lines and on unit tooltips. /ff opens one window (and the minimap button toggles it) with
--- tabs Bank, Crafting, Guild, Website and Options; every command is in COMMANDS (/ff help).
+-- tabs Bank, Crafting, Guild, KOS, Website and Options; kill-on-sight marks are shared like the rest; every command is in COMMANDS (/ff help).
 -- Accents (/accent, /troll) live in Accent.lua and AccentChat.lua.
 -- Plain Lua 5.1; every API call is guarded so a missing function never errors.
 
@@ -78,6 +78,8 @@ local function initDB()
   if type(db.shared.accounts) ~= "table" then db.shared.accounts = {} end
   -- craft requests, everyone's (asked over the guild channel; see the sharing section)
   if type(db.requests) ~= "table" then db.requests = {} end
+  -- kill-on-sight marks, everyone's, by lower-case name (see the sharing section)
+  if type(db.kos) ~= "table" then db.kos = {} end
   return db
 end
 
@@ -1481,6 +1483,91 @@ function asks.prune()
   end
 end
 
+-- Kill on sight: guildmates mark enemy players (K payloads, rules in Sync.lua), kept in FantasyForceDB.kos by
+-- lower-case name, everyone's, so anyone online passes them on to whoever logs in later. Anyone in the guild
+-- may mark or clear. What shows them (the target frame's badge, nameplates, tooltips, the KOS tab, the
+-- attacked-by notice) is in the kill-on-sight section further down.
+local kos = { attackers = {}, seen = {}, told = {}, offered = {} }
+
+function kos.marks() return initDB().kos end
+
+function kos.index()
+  if not kos.idx then
+    kos.idx = Sync and Sync.kosIndex(kos.marks()) or { byKey = {}, byGuid = {}, byFirst = {}, count = 0 }
+  end
+  return kos.idx
+end
+
+function kos.find(name, class, guid)
+  if not Sync then return nil end
+  return Sync.findKos(kos.index(), name, class, guid)
+end
+
+function kos.changed()
+  kos.idx = nil
+  if kos.refresh then pcall(kos.refresh) end
+  if refreshWindows then refreshWindows() end
+end
+
+-- Keeps a mark as it is now (new, changed or cleared) and sends it to the guild.
+function kos.push(k)
+  local marks, key = kos.marks(), Sync.kosKey(k.name)
+  local old, stamp = marks[key], time()
+  if type(old) == "table" and num(old.updated, 0) >= stamp then stamp = old.updated + 1 end
+  k.updated, k.from, k.heard = stamp, nil, nil
+  marks[key] = k
+  enqueue("K", k.name, stamp, Sync.encodeKos(k), 0, false)
+  kos.changed()
+end
+
+kos.DETAILS = { "class", "race", "level", "guild", "guid" }
+
+-- Marks a player. info = { name, class, race, level, guild, guid }: what the game says of them (a name alone when
+-- typed). reason nil keeps the one it had. Returns the mark and true when it's new (false: it was marked already,
+-- and only the reason or details changed); nil when there's no name.
+function kos.mark(info, reason)
+  if not Sync or type(info) ~= "table" then return nil end
+  local name = Sync.cleanKosName(info.name)
+  if name == "" then return nil end
+  local old = kos.marks()[Sync.kosKey(name)]
+  local active = type(old) == "table" and old.state == "kos"
+  local k = { name = active and old.name or name, state = "kos", by = active and old.by or readName(),
+    added = active and old.added or time(),
+    reason = reason ~= nil and Sync.cleanNote(reason) or (active and str(old.reason)) or "" }
+  -- what the game says now, else what was known (a typed name keeps the details of the player seen before)
+  for _, f in ipairs(kos.DETAILS) do
+    if info[f] ~= nil then k[f] = info[f] elseif type(old) == "table" then k[f] = old[f] end
+  end
+  kos.push(k)
+  return k, not active
+end
+
+-- Clears a mark (by name, any case). Returns the cleared mark, or nil when that player isn't marked.
+function kos.clear(name)
+  if not Sync then return nil end
+  local old = kos.marks()[Sync.kosKey(name)]
+  if type(old) ~= "table" or old.state ~= "kos" then return nil end
+  local k = {}
+  for f, v in pairs(old) do k[f] = v end
+  k.state, k.by = "cleared", readName() -- a clear says who cleared it
+  kos.push(k)
+  return k
+end
+
+-- A mark (or clear) arrived from the guild.
+function kos.arrived(p, who)
+  local k = Sync.decodeKos(p.subject, p.updated, p.body)
+  if k and Sync.storeKos(kos.marks(), k, time(), who) then
+    kos.changed()
+    if kos.announce then pcall(kos.announce, k) end
+  end
+end
+
+function kos.prune()
+  if Sync then Sync.pruneKos(kos.marks(), time()) end
+  kos.idx = nil
+end
+
 -- Sends what changed since it was last sent.
 local function shareOwn()
   if not canShare() then return end
@@ -1557,6 +1644,15 @@ local function answerRequest(req, asker)
       end
     end
   end
+  -- kill-on-sight marks (only to an addon that knows them): whoever marked it answers first
+  if req.kos then
+    local own = initDB().characters
+    for key, k in pairs(kos.marks()) do
+      if type(k) == "table" and num(k.updated, 0) > num(req.kos[key], 0) then
+        enqueue("K", k.name, k.updated, Sync.encodeKos(k), own[str(k.by)] and rand(1, 3) or rand(4, 12), true)
+      end
+    end
+  end
 end
 
 -- Asks the guild for anything newer than what this client holds.
@@ -1581,8 +1677,12 @@ local function sendRequest()
   for id, r in pairs(db.requests) do
     if type(r) == "table" then requests[id] = num(r.updated, 0) end
   end
+  local marks = {}
+  for key, k in pairs(kos.marks()) do
+    if type(k) == "table" then marks[key] = num(k.updated, 0) end
+  end
   st.lastRequest = time()
-  enqueue("R", readName(), time(), Sync.encodeRequest(bankStamp, stamps, accounts, requests), 0, false)
+  enqueue("R", readName(), time(), Sync.encodeRequest(bankStamp, stamps, accounts, requests, marks), 0, false)
 end
 
 -- A window opened: ask at most once an hour (every 5 minutes while there's nothing to show).
@@ -1618,6 +1718,8 @@ local function onPayload(p, who)
   elseif p.kind == "Q" then
     local r = Sync.decodeCraftRequest(p.subject, p.updated, p.body)
     if r and Sync.storeCraftRequest(db.requests, p.subject, r, time(), who) then asks.arrived(p.subject, r) end
+  elseif p.kind == "K" then
+    kos.arrived(p, who)
   elseif p.kind == "R" then
     local req = Sync.decodeRequest(p.body)
     if req then answerRequest(req, p.subject) end
@@ -1668,6 +1770,7 @@ local function onLogin()
       Sync.prune(initDB().shared.accounts, time(), CRAFTER_MAX_AGE)
     end
     asks.prune()
+    kos.prune()
     alts.index = nil
     shareOwn()
     asks.changed()
@@ -1759,11 +1862,16 @@ end
 local function hookTooltips()
   local T = TooltipDataProcessor
   local unitType = Enum and Enum.TooltipDataType and Enum.TooltipDataType.Unit
+  -- the kill-on-sight line (kos.tooltip, in the kill-on-sight section) goes first, then mains and alts
+  local function both(tt)
+    if kos.tooltip then pcall(kos.tooltip, tt) end
+    unitTooltip(tt)
+  end
   if T and type(T.AddTooltipPostCall) == "function" and unitType ~= nil then
-    local function post(tt) if tt == GameTooltip then unitTooltip(tt) end end
+    local function post(tt) if tt == GameTooltip then both(tt) end end
     if pcall(T.AddTooltipPostCall, unitType, post) then return end
   end
-  if GameTooltip and GameTooltip.HookScript then pcall(GameTooltip.HookScript, GameTooltip, "OnTooltipSetUnit", unitTooltip) end
+  if GameTooltip and GameTooltip.HookScript then pcall(GameTooltip.HookScript, GameTooltip, "OnTooltipSetUnit", both) end
 end
 
 registerChatFilters()
@@ -4823,6 +4931,11 @@ local COMMANDS = {
   { "/ff bank", "Guild bank" },
   { "/ff crafts", "Who can make what" },
   { "/ff guild", "Guildmates and their alts" },
+  { "/ff kos", "Mark your target kill on sight (no target: the KOS list)" },
+  { "/ff kos last", "Mark the last enemy player who attacked you" },
+  { "/ff kos <name>", "Mark a player by name; add \" - why\" for a reason" },
+  { "/ff kos clear <name>", "Clear a mark (no name: your target's)" },
+  { "/ff kos alerts off | on", "Warnings when a marked player is near" },
   { "/ff site", "Put your characters on the website" },
   { "/ff options", "Options" },
   { "/ff main", "Make this character your main" },
@@ -4869,13 +4982,16 @@ end
 -- state. Each returns the line the command prints; controls print nothing.
 
 local cmd = {}
+-- the KOS tab: kill-on-sight marks and who attacked you (filled in the kill-on-sight section)
+local kosView = { key = "Kos", nameWidth = 260, noFilters = true, rightClick = true, searchWidth = 200,
+  emptyWidth = 420 }
 -- TOP: where the pages start, below the title bar and the portrait (nothing sits under the portrait), as in
 -- the game's own portrait windows (their inset starts 60 down)
 local panel = { pages = {}, tabs = {}, W = 760, H = 528, TOP = -62,
-  views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView },
+  views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView, Kos = kosView },
   ICON = "Interface\\AddOns\\FantasyForce\\Media\\Icon",
   TABS = { { key = "Bank", label = "Bank" }, { key = "Crafts", label = "Crafting" }, { key = "Guild", label = "Guild" },
-    { key = "Site", label = "Website" }, { key = "Options", label = "Options" } } }
+    { key = "Kos", label = "KOS" }, { key = "Site", label = "Website" }, { key = "Options", label = "Options" } } }
 
 -- Something a control shows changed (by a command, a control or the game): show it.
 function ui.changed()
@@ -5870,6 +5986,689 @@ function asks.openRequest(id)
   panel.open("Crafts")
 end
 
+-- ----------------------------------------------------------- kill on sight --
+-- A mark shows wherever you meet the player: our badge (Media\Kos, a skull on a red crosshair) on the target and
+-- focus frames' portraits and over their nameplate, and a red "Kill on sight" line on their tooltip with who
+-- marked them and why. Seeing a marked player (target, focus, mouseover or nameplate) says so in chat with the
+-- raid warning sound, once per player every 5 minutes (/ff kos alerts off stops it). An enemy player who attacks
+-- you is remembered (the last 10, this session) and a notice offers Mark KOS at once, in combat too (it's our own
+-- plain button, nothing protected); being killed by one says "Killed by". Not in battlegrounds or arenas, where
+-- everyone attacks you. The target's right-click menu has Mark kill on sight where the game lets addons add to it.
+kos.ICON = "Interface\\AddOns\\FantasyForce\\Media\\Kos"
+kos.ICON_TEXT = "|T" .. kos.ICON .. ":14:14|t"
+kos.SEEN_EVERY = 300
+kos.ATTACKERS_MAX = 10
+kos.KILL_WINDOW = 15 -- seconds: an attacker this recent when you die is who killed you
+kos.TOAST_SECONDS = 20
+-- seconds a duel challenge keeps attacks from counting: the game says when a duel ends, but not always when a
+-- challenge is declined or runs out, so the duel is forgotten after this whatever happens
+kos.DUEL_SECONDS = 180
+kos.RED = "|cffff3030"
+kos.frames, kos.plates = {}, {}
+
+function kos.alertsOn() return initDB().kosAlerts ~= false end
+
+function kos.inBattle()
+  local _, kind = try(IsInInstance)
+  return kind == "pvp" or kind == "arena"
+end
+
+-- A player's name as the game shows it: "First Last" when one of its name functions gives both.
+function kos.unitName(unit)
+  local short = stripRealm(str((try(UnitName, unit))))
+  if short == "" or short == "Unknown" or short:find(" ", 1, true) then return short end
+  return names.take(try(GetUnitName, unit, true), short) or names.take((try(UnitFullName, unit)), short)
+    or names.take(try(UnitPVPName, unit), short) or short
+end
+
+-- What the game says of a player unit: { name, class, race, level, guild, guid, me, hostile }, or nil.
+function kos.unitInfo(unit)
+  if not unit or not try(UnitExists, unit) or not try(UnitIsPlayer, unit) then return nil end
+  local name = kos.unitName(unit)
+  if name == "" or name == "Unknown" then return nil end
+  local _, class = try(UnitClass, unit)
+  local race = try(UnitRace, unit)
+  local level = num(try(UnitLevel, unit), 0)
+  local guild = try(GetGuildInfo, unit)
+  local guid = try(UnitGUID, unit)
+  return { name = name, class = type(class) == "string" and class ~= "" and class or nil,
+    race = type(race) == "string" and race ~= "" and race or nil, level = level > 0 and level or nil,
+    guild = type(guild) == "string" and guild ~= "" and guild or nil,
+    guid = type(guid) == "string" and guid ~= "" and guid or nil,
+    me = try(UnitIsUnit, unit, "player") and true or false,
+    hostile = (try(UnitCanAttack, "player", unit) or try(UnitIsEnemy, "player", unit)) and true or false }
+end
+
+-- The mark for a unit (nil when it has none, or it's you) and what the game says of it.
+function kos.forUnit(unit)
+  local info = kos.unitInfo(unit)
+  if not info or info.me then return nil, info end
+  return kos.find(info.name, info.class, info.guid), info
+end
+
+-- Why a player can't be marked, or nil: it's you or one of your characters, or someone in your guild.
+function kos.refuse(info)
+  local name = str(info.name)
+  if info.me or name == readName() or initDB().characters[name] then return "that's you." end
+  local guild = myGuild()
+  if guild == "" then return nil end
+  if info.guild == guild then return name .. " is in " .. guild .. "." end
+  local g = initDB().guild
+  for _, m in ipairs(type(g) == "table" and type(g.members) == "table" and g.members or {}) do
+    if type(m) == "table" and m.name == name then return name .. " is in " .. guild .. "." end
+  end
+  return nil
+end
+
+-- "Itz Shifty (32 Night Elf Druid, <Dynasty>)", whatever of that is known.
+function kos.describe(k, plain)
+  local bits = {}
+  if k.level then bits[#bits + 1] = tostring(k.level) end
+  if k.race then bits[#bits + 1] = k.race end
+  if k.class then bits[#bits + 1] = ui.className(k.class) end
+  local what = table.concat(bits, " ")
+  if k.guild then what = what .. (what ~= "" and ", " or "") .. "<" .. k.guild .. ">" end
+  local name = plain and k.name or ((k.class and classHex(k.class) or "") .. k.name .. (k.class and "|r" or ""))
+  return name .. (what ~= "" and (" (" .. what .. ")") or "")
+end
+
+-- A typed mark gains the details the game shows once someone meets the player (once: then it has them).
+function kos.learn(k, info)
+  if not info or (k.class or not info.class) and (k.guid or not info.guid) then return end
+  if kos.learning then return end
+  kos.learning = true
+  after(1, function()
+    kos.learning = nil
+    local now = kos.marks()[Sync.kosKey(k.name)]
+    if type(now) ~= "table" or now.state ~= "kos" then return end
+    kos.mark({ name = now.name, class = info.class, race = info.race, level = info.level, guild = info.guild,
+      guid = info.guid }, nil)
+  end)
+end
+
+-- A marked player is here: one chat line and the raid warning sound, once per player every 5 minutes.
+function kos.spotted(k, info)
+  kos.learn(k, info)
+  local key, now = Sync.kosKey(k.name), time()
+  if kos.seen[key] and now - kos.seen[key] < kos.SEEN_EVERY then return end
+  kos.seen[key] = now
+  if not kos.alertsOn() then return end
+  local why = str(k.reason) ~= "" and (": " .. k.reason) or ""
+  print_(kos.ICON_TEXT .. " " .. kos.RED .. "Kill on sight:|r " .. kos.describe(info and {
+    name = k.name, class = info.class or k.class, race = info.race or k.race, level = info.level or k.level,
+    guild = info.guild or k.guild } or k) .. " is here" .. why)
+  local kit = type(SOUNDKIT) == "table" and (SOUNDKIT.RAID_WARNING or SOUNDKIT.READY_CHECK) or nil
+  if kit then try(PlaySound, kit, "SFX") end
+end
+
+-- A guildmate marked someone just now: one chat line (marks passed on at login, older ones, stay quiet).
+function kos.announce(k)
+  if k.state ~= "kos" or time() - num(k.added, 0) > 600 then return end
+  local key = Sync.kosKey(k.name)
+  if kos.told[key] == k.added then return end
+  kos.told[key] = k.added
+  print_(kos.ICON_TEXT .. " " .. str(k.by) .. " marked " .. kos.describe(k) .. " kill on sight"
+    .. (str(k.reason) ~= "" and (": " .. k.reason) or "."))
+end
+
+-- --------------------------------------------------- the badge on unit frames --
+
+-- The portrait of the game's target or focus frame (each game version keeps it somewhere else), else the frame.
+function kos.portraitOf(f)
+  local function frameish(v) return type(v) == "table" and v or nil end
+  local c = frameish(f.TargetFrameContainer) or frameish(f.FocusFrameContainer)
+  local name = try(f.GetName, f)
+  return (c and frameish(c.Portrait)) or frameish(f.portrait) or frameish(f.Portrait)
+    or (type(name) == "string" and frameish(_G[name .. "Portrait"])) or f
+end
+
+-- The skull on a frame, with a soft pulse; our own frame on top of the game's, never taking the mouse.
+function kos.makeBadge(host, size)
+  local b = newFrame("Frame", nil, host)
+  if not b then return nil end
+  b:SetSize(size, size)
+  try(b.SetFrameLevel, b, num(try(host.GetFrameLevel, host), 1) + 10)
+  try(b.EnableMouse, b, false)
+  local glow = b:CreateTexture(nil, "BACKGROUND")
+  glow:SetPoint("CENTER", b, "CENTER", 0, 0)
+  glow:SetSize(size * 1.6, size * 1.6)
+  glow:SetTexture("Interface\\CharacterFrame\\TempPortraitAlphaMask")
+  try(glow.SetVertexColor, glow, 1, 0.1, 0.05, 0.55)
+  b.icon = b:CreateTexture(nil, "ARTWORK")
+  b.icon:SetAllPoints()
+  b.icon:SetTexture(kos.ICON)
+  local ag = try(glow.CreateAnimationGroup, glow)
+  if ag then
+    local a = try(ag.CreateAnimation, ag, "Alpha")
+    if a then
+      try(a.SetFromAlpha, a, 1)
+      try(a.SetToAlpha, a, 0.15)
+      try(a.SetDuration, a, 0.8)
+      try(ag.SetLooping, ag, "BOUNCE")
+      b:SetScript("OnShow", function() try(ag.Play, ag) end)
+      b:SetScript("OnHide", function() try(ag.Stop, ag) end)
+    end
+  end
+  b:Hide()
+  return b
+end
+
+kos.UNIT_FRAMES = { target = "TargetFrame", focus = "FocusFrame" }
+
+function kos.updateUnit(unit)
+  local b = kos.frames[unit]
+  if b == nil then
+    local host = _G[kos.UNIT_FRAMES[unit] or ""]
+    b = type(host) == "table" and kos.makeBadge(host, 28) or false
+    if b then b:SetPoint("CENTER", kos.portraitOf(host), "TOPLEFT", 6, -6) end
+    kos.frames[unit] = b
+  end
+  local k, info = kos.forUnit(unit)
+  if b then
+    if k then b:Show() else b:Hide() end
+  end
+  if k then kos.spotted(k, info) end
+end
+
+-- ---------------------------------------------------------------- nameplates --
+
+function kos.plateFor(unit)
+  local plate = C_NamePlate and try(C_NamePlate.GetNamePlateForUnit, unit)
+  if not plate or try(plate.IsForbidden, plate) then return nil end
+  return plate
+end
+
+function kos.plateAdded(unit)
+  local plate = kos.plateFor(unit)
+  if not plate then return end
+  local k, info = kos.forUnit(unit)
+  local b = plate.ffKos
+  if not k then
+    if b then b:Hide() end
+    return
+  end
+  if not b then
+    b = kos.makeBadge(plate, 26)
+    if not b then return end
+    b:SetPoint("BOTTOM", plate, "TOP", 0, 0)
+    plate.ffKos = b
+  end
+  b:Show()
+  kos.spotted(k, info)
+end
+
+function kos.plateRemoved(unit)
+  local plate = kos.plateFor(unit)
+  if plate and plate.ffKos then plate.ffKos:Hide() end
+end
+
+-- Every nameplate's unit token now shown.
+function kos.plateUnits()
+  local out = {}
+  for _, plate in ipairs(C_NamePlate and try(C_NamePlate.GetNamePlates) or {}) do
+    local u = plate.namePlateUnitToken or (plate.UnitFrame and plate.UnitFrame.unit)
+    if type(u) == "string" then out[#out + 1] = u end
+  end
+  return out
+end
+
+-- The marks changed: every badge says so again.
+function kos.refresh()
+  for unit in pairs(kos.UNIT_FRAMES) do pcall(kos.updateUnit, unit) end
+  for _, u in ipairs(kos.plateUnits()) do pcall(kos.plateAdded, u) end
+end
+
+-- ------------------------------------------------------------------ tooltip --
+
+function kos.tooltip(tt)
+  local _, unit = tt:GetUnit()
+  if not unit then return end
+  local k, info = kos.forUnit(unit)
+  if not k then return end
+  tt:AddLine(kos.ICON_TEXT .. " Kill on sight", 1, 0.19, 0.19)
+  tt:AddLine("Marked by " .. str(k.by) .. ", " .. ago(k.added) .. (str(k.reason) ~= "" and (": " .. k.reason) or ""),
+    1, 0.6, 0.6, true)
+  tt:Show()
+  kos.spotted(k, info)
+end
+
+-- ---------------------------------------------------------- who attacked you --
+
+kos.band = type(bit) == "table" and bit.band or nil
+kos.PLAYER_FLAG = type(COMBATLOG_OBJECT_TYPE_PLAYER) == "number" and COMBATLOG_OBJECT_TYPE_PLAYER or 0x400
+kos.HOSTILE_FLAG = type(COMBATLOG_OBJECT_REACTION_HOSTILE) == "number" and COMBATLOG_OBJECT_REACTION_HOSTILE or 0x40
+kos.HARM = { SWING_DAMAGE = true, RANGE_DAMAGE = true, SPELL_DAMAGE = true, SPELL_PERIODIC_DAMAGE = true,
+  SWING_MISSED = true, RANGE_MISSED = true, SPELL_MISSED = true, SPELL_AURA_APPLIED = true }
+
+function kos.myGuid()
+  if not kos.guid then
+    local g = try(UnitGUID, "player")
+    kos.guid = type(g) == "string" and g ~= "" and g or nil
+  end
+  return kos.guid
+end
+
+-- A unit now showing the player with that GUID (target, focus, mouseover, a nameplate), for their level and guild.
+function kos.unitByGuid(guid)
+  if not guid then return nil end
+  local list = { "target", "focus", "mouseover" }
+  for _, u in ipairs(kos.plateUnits()) do list[#list + 1] = u end
+  for _, u in ipairs(list) do
+    if try(UnitGUID, u) == guid then return u end
+  end
+  return nil
+end
+
+-- The combat log: an enemy player hurt you (or tried to, or put something on you).
+function kos.combatLog()
+  local band = kos.band
+  if not band or type(CombatLogGetCurrentEventInfo) ~= "function" then return end
+  local _, sub, _, srcGUID, srcName, srcFlags, _, dstGUID = CombatLogGetCurrentEventInfo()
+  kos.logWorks = true
+  if dstGUID == nil or dstGUID ~= kos.myGuid() or not kos.HARM[sub] then return end
+  local flags = num(srcFlags, 0)
+  if band(flags, kos.PLAYER_FLAG) == 0 or band(flags, kos.HOSTILE_FLAG) == 0 then return end
+  kos.attacked(srcGUID, srcName)
+end
+
+-- Without the combat log: you were hurt, and an enemy player in view has you targeted.
+function kos.hurt()
+  if kos.logWorks then return end
+  local list = { "target", "focus", "mouseover" }
+  for _, u in ipairs(kos.plateUnits()) do list[#list + 1] = u end
+  for _, u in ipairs(list) do
+    if try(UnitIsPlayer, u) and try(UnitCanAttack, u, "player") and try(UnitIsUnit, u .. "target", "player") then
+      local g = try(UnitGUID, u)
+      kos.attacked(type(g) == "string" and g or nil, kos.unitName(u), u)
+    end
+  end
+end
+
+-- An enemy player attacked you: remembered, and offered for marking (marked already: the kill-on-sight line).
+function kos.attacked(guid, name, unit)
+  if kos.dueling and time() - kos.dueling < kos.DUEL_SECONDS then return end
+  kos.dueling = nil
+  unit = unit or kos.unitByGuid(guid)
+  local info = unit and kos.unitInfo(unit) or nil
+  if not info then
+    local _, class, _, race, _, gname = try(GetPlayerInfoByGUID, guid)
+    name = stripRealm(str(name))
+    gname = stripRealm(str(gname))
+    if #gname > #name then name = gname end -- the fuller of the two
+    if name == "" or name == "Unknown" then return end
+    info = { name = name, guid = guid, class = type(class) == "string" and class ~= "" and class or nil,
+      race = type(race) == "string" and race ~= "" and race or nil }
+  end
+  if kos.refuse(info) then return end
+  local now = time()
+  info.at = now
+  for i, a in ipairs(kos.attackers) do
+    if (guid and a.guid == guid) or a.name == info.name then
+      table.remove(kos.attackers, i)
+      for _, f in ipairs(kos.DETAILS) do if info[f] == nil then info[f] = a[f] end end
+      break
+    end
+  end
+  table.insert(kos.attackers, 1, info)
+  while #kos.attackers > kos.ATTACKERS_MAX do table.remove(kos.attackers) end
+  kos.last = info
+  local k = kos.find(info.name, info.class, info.guid)
+  if k then
+    kos.spotted(k, info)
+  elseif not kos.inBattle() then
+    kos.offer(info, "attacked")
+  end
+  if ui.windows.Kos then redrawSoon() end
+end
+
+-- You died: an enemy player who attacked you in the last seconds killed you.
+function kos.died()
+  local a = kos.last
+  if not a or time() - num(a.at, 0) > kos.KILL_WINDOW or kos.inBattle() then return end
+  a.killed = true
+  if not kos.find(a.name, a.class, a.guid) then kos.offer(a, "killed") end
+end
+
+-- ------------------------------------------------------------ the notice --
+
+-- The attacked-by notice: our skull, "Attacked by Itz Shifty", what's known of them, and Mark KOS.
+function kos.toastFrame()
+  if kos.toast ~= nil then return kos.toast or nil end
+  local f = newFrame("Frame", "FantasyForceKosToast", UIParent, "BackdropTemplate") or newFrame("Frame", "FantasyForceKosToastB", UIParent)
+  kos.toast = f or false
+  if not f then return nil end
+  f:SetSize(320, 64)
+  try(f.SetFrameStrata, f, "DIALOG")
+  try(f.SetClampedToScreen, f, true)
+  f:SetPoint("TOP", UIParent, "TOP", 0, -130)
+  try(f.EnableMouse, f, true)
+  if f.SetBackdrop then
+    pcall(f.SetBackdrop, f, { bgFile = "Interface\\DialogFrame\\UI-DialogBox-Background-Dark",
+      edgeFile = "Interface\\DialogFrame\\UI-DialogBox-Gold-Border", tile = true, tileSize = 32, edgeSize = 16,
+      insets = { left = 4, right = 4, top = 4, bottom = 4 } })
+  else
+    local bg = f:CreateTexture(nil, "BACKGROUND")
+    bg:SetAllPoints()
+    setColor(bg, 0.05, 0.02, 0.02, 0.92)
+  end
+  f.icon = f:CreateTexture(nil, "ARTWORK")
+  f.icon:SetSize(40, 40)
+  f.icon:SetPoint("LEFT", f, "LEFT", 10, 0)
+  f.icon:SetTexture(kos.ICON)
+  f.title = f:CreateFontString(nil, "OVERLAY", "GameFontNormal")
+  f.title:SetPoint("TOPLEFT", f, "TOPLEFT", 58, -12)
+  f.title:SetWidth(232)
+  f.title:SetJustifyH("LEFT")
+  try(f.title.SetWordWrap, f.title, false)
+  f.text = f:CreateFontString(nil, "OVERLAY", "GameFontHighlightSmall")
+  f.text:SetPoint("TOPLEFT", f, "TOPLEFT", 58, -31)
+  f.text:SetWidth(150)
+  f.text:SetJustifyH("LEFT")
+  try(f.text.SetWordWrap, f.text, false)
+  f.mark = ui.button(f, 216, -32, 92, "Mark KOS", function()
+    local a = f.attacker
+    if not a then return end
+    print_(kos.markInfo(a))
+    f.title:SetText(kos.RED .. a.name .. "|r is kill on sight")
+    try(f.mark.Disable, f.mark)
+    kos.expireToast(f.gen, 3)
+  end, "Mark them kill on sight for the whole guild. Add a reason later with /ff kos " .. "<name> - <reason>.")
+  local close = newFrame("Button", nil, f, "UIPanelCloseButton")
+  if close then
+    close:SetSize(20, 20)
+    close:SetPoint("TOPRIGHT", f, "TOPRIGHT", -2, -2)
+    close:SetScript("OnClick", function() f.attacker = nil f:Hide() end)
+  end
+  f:Hide()
+  return f
+end
+
+function kos.expireToast(gen, sec)
+  after(sec, function()
+    local f = kos.toast
+    if not f or f.gen ~= gen or not f:IsShown() then return end
+    if try(f.IsMouseOver, f) or try(MouseIsOver, f) then kos.expireToast(gen, 2) return end
+    f.attacker = nil
+    f:Hide()
+  end)
+end
+
+-- Offers to mark an attacker: the notice (once per attacker a minute, a kill always) and one chat line.
+function kos.offer(a, how)
+  local id, now = a.guid or a.name, time()
+  if how ~= "killed" and kos.offered[id] and now - kos.offered[id] < 60 then return end
+  kos.offered[id] = now
+  print_((how == "killed" and "Killed by " or "Attacked by ") .. kos.describe(a)
+    .. ". /ff kos last marks them kill on sight.")
+  local f = kos.toastFrame()
+  if not f then return end
+  f.attacker, f.gen = a, num(f.gen, 0) + 1
+  f.title:SetText((how == "killed" and "Killed by " or "Attacked by ") .. ((a.class and classHex(a.class)) or "")
+    .. a.name .. (a.class and "|r" or ""))
+  local rest = kos.describe(a, true):sub(#a.name + 1):gsub("^ %(", ""):gsub("%)$", "")
+  f.text:SetText(rest ~= "" and rest or "Enemy player")
+  if f.mark then try(f.mark.Enable, f.mark) end
+  f:Show()
+  kos.expireToast(f.gen, kos.TOAST_SECONDS)
+end
+
+-- ------------------------------------------------------------ marking --
+
+-- Marks a player from what's known of them; the line to print.
+function kos.markInfo(info, reason)
+  local why = kos.refuse(info)
+  if why then return "can't mark " .. str(info.name) .. ": " .. why end
+  local k, new = kos.mark(info, reason)
+  if not k then return "who? /ff kos <name> marks a player by name." end
+  if not new then
+    return k.name .. " was already kill on sight" .. (reason and "; the reason is now: " .. (k.reason ~= "" and k.reason or "none") or ".")
+  end
+  return kos.ICON_TEXT .. " " .. kos.describe(k) .. " is now kill on sight for the guild"
+    .. (k.reason ~= "" and (": " .. k.reason) or (". Add why: /ff kos " .. k.name .. " - <reason>"))
+end
+
+-- Marks your target; the line to print.
+function kos.markTarget(reason)
+  local info = kos.unitInfo("target")
+  if not info then return "target a player first, or name them: /ff kos <name> - <reason>." end
+  return kos.markInfo(info, reason)
+end
+
+-- "itz shifty" typed: "Itz Shifty", as the game writes names.
+function kos.capitalize(s)
+  return (s:gsub("(%S)(%S*)", function(a, b) return a:upper() .. b:lower() end))
+end
+
+-- /ff kos ... (the text after "kos", as typed). Returns the line to print, or nil.
+function kos.command(rest)
+  rest = str(rest):gsub("^%s+", ""):gsub("%s+$", "")
+  local text, reason = rest:match("^(.-)%s*%-%s+(.*)$")
+  if not text then
+    text = rest:match("^%-$") and "" or rest
+    reason = nil
+  end
+  local lower = text:lower()
+  if text == "" then
+    if try(UnitIsPlayer, "target") or reason then return kos.markTarget(reason) end
+    panel.toggle("Kos")
+    return nil
+  elseif lower == "last" then
+    if not kos.last then return "no enemy player has attacked you since you logged in." end
+    return kos.markInfo(kos.last, reason)
+  elseif lower == "list" then
+    local list = kosView.marks("")
+    if #list == 0 then return "nobody is kill on sight." end
+    print_(#list .. " kill on sight:")
+    for i = 1, math.min(#list, 15) do
+      local k = list[i]
+      print_("  " .. kos.describe(k) .. ", by " .. str(k.by) .. (str(k.reason) ~= "" and (": " .. k.reason) or ""))
+    end
+    return #list > 15 and ("  +" .. (#list - 15) .. " more: /ff kos") or nil
+  elseif lower == "alerts on" or lower == "alerts off" then
+    initDB().kosAlerts = lower == "alerts off" and false or nil
+    return lower == "alerts on" and "a marked player in sight says so in chat, with a warning sound."
+      or "marked players no longer say so in chat (the skulls still show)."
+  elseif lower == "help" then
+    ui.printHelp("/ff kos")
+    return nil
+  end
+  local cleared = (lower == "clear" or lower == "remove") and "" or lower:match("^clear%s+(.*)$") or lower:match("^remove%s+(.*)$")
+  if cleared then
+    local name = text:sub(#text - #cleared + 1)
+    if name == "" then
+      local k = kos.forUnit("target")
+      if not k then return "your target isn't marked. /ff kos clear <name> clears one by name." end
+      name = k.name
+    end
+    local k = kos.clear(name)
+    if not k then return kos.capitalize(name) .. " isn't kill on sight." end
+    return k.name .. " is no longer kill on sight."
+  end
+  -- a name: your target's details when it's them
+  local info = kos.unitInfo("target")
+  if info and (Sync.kosKey(info.name) == lower or Sync.kosKey(info.name):match("^(%S+)") == lower) then
+    return kos.markInfo(info, reason)
+  end
+  return kos.markInfo({ name = kos.capitalize(text) }, reason)
+end
+
+-- The key binding: marks the target (cleared with the command or the KOS tab).
+function FantasyForce_MarkTarget()
+  pcall(function()
+    print_(kos.markTarget())
+  end)
+end
+BINDING_NAME_FANTASYFORCE_KOS = "Mark target kill on sight"
+
+-- The game's own right-click menus (target, focus, enemy players), on clients with the menu API that lets addons
+-- add to them; older clients' menus can't be touched without breaking the game's own, so they don't get it.
+function kos.hookMenus()
+  if kos.menusHooked or type(Menu) ~= "table" or type(Menu.ModifyMenu) ~= "function" then return end
+  kos.menusHooked = true
+  for _, tag in ipairs({ "MENU_UNIT_TARGET", "MENU_UNIT_FOCUS", "MENU_UNIT_ENEMY_PLAYER", "MENU_UNIT_PLAYER" }) do
+    pcall(Menu.ModifyMenu, tag, function(_, root, ctx)
+      pcall(function()
+        local info = type(ctx) == "table" and ctx.unit and kos.unitInfo(ctx.unit)
+        if not info or kos.refuse(info) then return end
+        local k = kos.find(info.name, info.class, info.guid)
+        root:CreateDivider()
+        if k then
+          root:CreateButton("Clear kill on sight", function() print_(kos.command("clear " .. k.name)) end)
+        else
+          root:CreateButton("Mark kill on sight", function() print_(kos.markInfo(info)) end)
+        end
+      end)
+    end)
+  end
+end
+
+-- ------------------------------------------------------------- the KOS tab --
+-- Who attacked you this session and isn't marked (click to mark), then everyone marked, newest first.
+
+-- The marks in force matching a search, newest first.
+function kosView.marks(search)
+  local out = {}
+  for _, k in pairs(kos.marks()) do
+    if type(k) == "table" and k.state == "kos" then
+      local hay = (str(k.name) .. " " .. str(k.guild) .. " " .. str(k.reason) .. " " .. str(k.by) .. " "
+        .. ui.className(k.class or "")):lower()
+      if search == "" or hay:find(search, 1, true) then out[#out + 1] = k end
+    end
+  end
+  table.sort(out, function(a, b)
+    if num(a.added, 0) ~= num(b.added, 0) then return num(a.added, 0) > num(b.added, 0) end
+    return a.name < b.name
+  end)
+  return out
+end
+
+function kosView.build(w)
+  local search = searchText(w)
+  local out = { rows = {}, filters = {}, empty = "Nobody is kill on sight yet.\n\nTarget an enemy player and press "
+    .. "Mark target (or type /ff kos). When one attacks you, a notice offers Mark KOS." }
+  local fresh = {}
+  for _, a in ipairs(kos.attackers) do
+    if not kos.find(a.name, a.class, a.guid) and (search == "" or a.name:lower():find(search, 1, true)) then
+      fresh[#fresh + 1] = a
+    end
+  end
+  if #fresh > 0 then
+    out.rows[#out.rows + 1] = { header = "Attacked you", key = "h:a" }
+    for _, a in ipairs(fresh) do out.rows[#out.rows + 1] = { attacker = a, key = "a:" .. (a.guid or a.name) } end
+  end
+  local list = kosView.marks(search)
+  if #list > 0 then
+    out.rows[#out.rows + 1] = { header = "Kill on sight", key = "h:k" }
+    for _, k in ipairs(list) do out.rows[#out.rows + 1] = { mark = k, key = "k:" .. Sync.kosKey(k.name) } end
+  end
+  if #out.rows == 0 and search ~= "" then out.empty = "Nothing matches." end
+  local total = kos.index().count
+  out.footer = total .. (total == 1 and " player" or " players") .. " kill on sight, shared with the guild."
+    .. gameColor("GRAY", true) .. "   Shift-right-click a mark to clear it.|r"
+  return out
+end
+
+function kosView.fill(w, row, d)
+  if d.header then
+    row.icon:SetTexture(nil)
+    row.label:SetText(gameColor("NORMAL", true) .. d.header .. "|r")
+    row.right:SetText("")
+    return
+  end
+  local p = d.mark or d.attacker
+  try(row.icon.SetTexCoord, row.icon, 0, 1, 0, 1)
+  ui.classTexture(row.icon, p.class)
+  if not p.class then row.icon:SetTexture(d.mark and kos.ICON or QUESTION_ICON) end
+  local name = (p.class and classHex(p.class) or "") .. p.name .. (p.class and "|r" or "")
+  if p.guild then name = name .. gameColor("GRAY", true) .. "  <" .. p.guild .. ">|r" end
+  row.label:SetText(name)
+  if d.mark then
+    local why = str(p.reason) ~= "" and (p.reason .. "  ") or ""
+    row.right:SetText(why .. gameColor("GRAY", true) .. str(p.by) .. ", " .. ago(p.added) .. "|r")
+  else
+    row.right:SetText(gameColor("GRAY", true) .. (p.killed and "killed you " or "attacked you ") .. ago(p.at) .. "|r  "
+      .. kos.RED .. "Click: mark|r")
+  end
+end
+
+function kosView.enter(w, row, d)
+  local tt = GameTooltip
+  if not tt or d.header then return end
+  local p = d.mark or d.attacker
+  try(tt.SetOwner, tt, row, "ANCHOR_RIGHT")
+  try(tt.SetText, tt, kos.describe(p))
+  if d.mark then
+    try(tt.AddLine, tt, "Kill on sight", 1, 0.19, 0.19)
+    try(tt.AddLine, tt, "Marked by " .. str(p.by) .. ", " .. ago(p.added), gameColor("HIGHLIGHT"))
+    if str(p.reason) ~= "" then try(tt.AddLine, tt, p.reason, gameColor("NORMAL")) end
+    try(tt.AddLine, tt, "Shift-right-click: clear the mark", gameColor("GRAY"))
+  else
+    try(tt.AddLine, tt, (p.killed and "Killed you " or "Attacked you ") .. ago(p.at), gameColor("HIGHLIGHT"))
+    try(tt.AddLine, tt, "Click: mark kill on sight", gameColor("GREEN"))
+  end
+  try(tt.Show, tt)
+end
+
+function kosView.click(w, d, _, button)
+  if d.attacker and button ~= "RightButton" then
+    print_(kos.markInfo(d.attacker))
+  elseif d.mark and button == "RightButton" and shiftDown() then
+    print_(kos.command("clear " .. d.mark.name))
+  end
+  hideTooltip()
+  pcall(ui.render, w)
+end
+
+function kosView.isEmpty() return kos.index().count == 0 end
+
+function kosView.make(w, host)
+  local b = ui.button(host, w.width - 132, -4, 120, "Mark target", function()
+    print_(kos.markTarget())
+    pcall(ui.render, w)
+  end, "Marks your target kill on sight for the whole guild (the same as /ff kos). The skull then shows on "
+    .. "their portrait and nameplate for everyone with the addon.")
+  w.markButton = b
+end
+
+-- Kill on sight's own events, on a frame of their own so the combat log (many events a second in a fight) is
+-- looked at by one cheap check and never goes through the main handler below.
+kos.events = CreateFrame and CreateFrame("Frame") or nil
+if kos.events then
+  local ev = kos.events
+  for _, e in ipairs({ "PLAYER_LOGIN", "PLAYER_TARGET_CHANGED", "PLAYER_FOCUS_CHANGED", "NAME_PLATE_UNIT_ADDED",
+    "NAME_PLATE_UNIT_REMOVED", "COMBAT_LOG_EVENT_UNFILTERED", "PLAYER_DEAD", "DUEL_REQUESTED", "DUEL_FINISHED" }) do
+    pcall(ev.RegisterEvent, ev, e)
+  end
+  -- the player's own hits only, where the client can filter by unit
+  if not (ev.RegisterUnitEvent and pcall(ev.RegisterUnitEvent, ev, "UNIT_COMBAT", "player")) then
+    pcall(ev.RegisterEvent, ev, "UNIT_COMBAT")
+  end
+  ev:SetScript("OnEvent", function(_, event, arg1, arg2)
+    if event == "COMBAT_LOG_EVENT_UNFILTERED" then
+      pcall(kos.combatLog)
+    elseif event == "UNIT_COMBAT" then
+      if arg1 == "player" and arg2 ~= "HEAL" then pcall(kos.hurt) end
+    elseif event == "PLAYER_TARGET_CHANGED" then
+      pcall(kos.updateUnit, "target")
+    elseif event == "PLAYER_FOCUS_CHANGED" then
+      pcall(kos.updateUnit, "focus")
+    elseif event == "NAME_PLATE_UNIT_ADDED" then
+      pcall(kos.plateAdded, arg1)
+    elseif event == "NAME_PLATE_UNIT_REMOVED" then
+      pcall(kos.plateRemoved, arg1)
+    elseif event == "PLAYER_DEAD" then
+      pcall(kos.died)
+    elseif event == "DUEL_REQUESTED" then
+      kos.dueling = time()
+    elseif event == "DUEL_FINISHED" then
+      kos.dueling = nil
+    elseif event == "PLAYER_LOGIN" then
+      kos.guid = nil
+      pcall(kos.hookMenus)
+    end
+  end)
+end
+
 -- ----------------------------------------------------------------- events --
 
 local frame = CreateFrame and CreateFrame("Frame") or nil
@@ -6009,8 +6808,13 @@ local TAB_COMMANDS = { bank = "Bank", crafts = "Crafts", craft = "Crafts", craft
 SLASH_FANTASYFORCE1 = "/ff"
 if type(SlashCmdList) == "table" then SlashCmdList["FANTASYFORCE"] = function(msg)
   local ok = pcall(function()
-    msg = str(msg):lower():gsub("^%s+", ""):gsub("%s+$", "")
-    if msg == "" then
+    local typed = str(msg):gsub("^%s+", ""):gsub("%s+$", "")
+    msg = typed:lower()
+    if msg == "kos" or msg:sub(1, 4) == "kos " then
+      -- names and reasons as typed, not lower-cased
+      local line = kos.command(typed:sub(5))
+      if line then print_(line) end
+    elseif msg == "" then
       if not panel.toggle(nil) then ui.printSummary() end
     elseif TAB_COMMANDS[msg] then
       panel.toggle(TAB_COMMANDS[msg])
@@ -6021,6 +6825,7 @@ if type(SlashCmdList) == "table" then SlashCmdList["FANTASYFORCE"] = function(ms
     elseif msg == "reset" then
       FantasyForceDB = nil
       initDB()
+      kos.changed()
       lastGuildRecord = 0
       lastRosterRequest = 0
       recordCharacter()
@@ -6049,6 +6854,6 @@ if type(ns) == "table" then
   ns.try, ns.str, ns.print, ns.after = try, str, print_, after
   ns.printHelp, ns.onSettingChanged = ui.printHelp, ui.changed
   ns.fullName = names.fullOf -- a member's full name from a first name typed alone (the accent line's /w)
-  ns.ff = { ui = ui, panel = panel, cmd = cmd, asks = asks, names = names,
-    views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView, Site = siteView } }
+  ns.ff = { ui = ui, panel = panel, cmd = cmd, asks = asks, names = names, kos = kos,
+    views = { Bank = bankWindow, Crafts = craftsWindow, Guild = guildView, Kos = kosView, Site = siteView } }
 end

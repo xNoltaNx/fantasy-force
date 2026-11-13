@@ -1,6 +1,6 @@
 ## Interface: 16001
 ## Title: Fantasy Force
-## Notes: The Fantasy Force guild window (/ff): guild bank, crafting, guildmates and their alts, the website, and accents.
+## Notes: The Fantasy Force guild window (/ff): guild bank, crafting, guildmates and their alts, kill on sight, the website, and accents.
 ## Author: Fantasy Force
 ## Version: @project-version@
 ## SavedVariables: FantasyForceDB
