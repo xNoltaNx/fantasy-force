@@ -231,6 +231,7 @@ input[type='checkbox'] { accent-color: var(--accent); width: 1.05rem; height: 1.
 .path { font-family: ui-monospace, Consolas, monospace; background: var(--panel-2); border-radius: 8px; padding: 0.35rem 0.6rem; overflow-wrap: anywhere; }
 .error-line { color: var(--error-ink); background: var(--error-bg); border-radius: 8px; padding: 0.4rem 0.7rem; }
 .done-line { color: var(--good); font-weight: 700; }
+.import .linked { align-items: center; flex-wrap: wrap; gap: 0.5rem; }
 .import-list { list-style: none; padding: 0; margin: 0 0 0.8rem; }
 .import-list li { padding: 0.3rem 0; border-bottom: 1.5px dashed var(--line); }
 .import-list .check { flex-wrap: wrap; gap: 0.4rem; }
