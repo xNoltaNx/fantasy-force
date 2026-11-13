@@ -26,7 +26,6 @@ export function AddonImport({ memberId }: { memberId: string }) {
   const [over, setOver] = useState(false)
   const [done, setDone] = useState('')
   const [linked, setLinked] = useState<Remembered | null>(null)
-  const [needsClick, setNeedsClick] = useState(false)
   const pending = useRef(0) // lastModified of the remembered file now on screen, recorded once it's brought in
 
   const known = new Set(data.characters.filter((c) => c.member_id === memberId).map((c) => c.name.toLowerCase()))
@@ -70,46 +69,15 @@ export function AddonImport({ memberId }: { memberId: string }) {
     await remember(memberId, next)
   }
 
-  // The remembered file, read again: characters already here update by themselves; new ones wait for a pick.
-  const readLinked = async (r: Remembered, ask: boolean, fresh = false) => {
-    if (!(await allowed(r.handle, ask))) { setNeedsClick(true); return }
-    setNeedsClick(false)
-    let f: File
-    try { f = await r.handle.getFile() } catch {
-      setError("Couldn't open the remembered file (moved or renamed?). Choose it again.")
-      return
-    }
-    if (!fresh && f.lastModified <= r.imported) return // nothing new since the last import
-    const parsed = await parse(f)
-    if (!parsed) return
-    pending.current = f.lastModified
-    const mine = parsed.characters.filter((c) => known.has(c.name.toLowerCase()))
-    const added = parsed.characters.filter((c) => !known.has(c.name.toLowerCase()) && !otherOwner(c.name) && (c.inGuild || !parsed.characters.some((x) => x.inGuild)))
-    if (!fresh && mine.length && await act(() => store.importCharacters(memberId, mine))) {
-      setDone(`Updated ${mine.length} ${mine.length === 1 ? 'character' : 'characters'} from your saved file (saved ${ago(f.lastModified)}).`)
-      if (!added.length) { await markImported(); return }
-    }
-    if (fresh || added.length) show(parsed, fresh ? undefined : added.map((c) => c.name))
-    else await markImported()
-  }
-
+  // Reading it again on each visit is done site-wide (SavedFileSync); here it's only chosen, shown and forgotten.
   useEffect(() => {
     if (!canRemember()) return
     let gone = false
-    void recall(memberId).then((r) => {
-      if (gone || !r) return
-      setLink(r)
-      void readLinked(r, false)
-    })
-    // back on this tab (say, after logging out of the game): read it again, without asking
-    const back = () => { if (document.visibilityState === 'visible' && link.current) void readRef.current(link.current, false) }
-    document.addEventListener('visibilitychange', back)
-    return () => { gone = true; document.removeEventListener('visibilitychange', back) }
-    // once per member: data changes must not re-read the file
+    void recall(memberId).then((r) => { if (!gone) setLink(r) })
+    return () => { gone = true }
   }, [memberId])
-  const readRef = useRef(readLinked)
-  readRef.current = readLinked
 
+  // Chosen (or dropped) and remembered: the whole file shows, to pick which characters come in.
   const connect = async (given?: Awaited<ReturnType<typeof pick>>) => {
     const h = given ?? await pick()
     if (!h) return
@@ -117,7 +85,16 @@ export function AddonImport({ memberId }: { memberId: string }) {
     const r = { handle: h, imported: 0 }
     setLink(r)
     await remember(memberId, r)
-    await readLinked(r, true, true)
+    if (!(await allowed(h, true))) { setError("The browser didn't allow reading the file. Choose it again and allow it."); return }
+    let f: File
+    try { f = await h.getFile() } catch {
+      setError("Couldn't open that file. Choose it again.")
+      return
+    }
+    const parsed = await parse(f)
+    if (!parsed) return
+    pending.current = f.lastModified
+    show(parsed)
   }
 
   const chosen = file?.characters.filter((c) => picked.has(c.name)) ?? []
@@ -146,9 +123,8 @@ export function AddonImport({ memberId }: { memberId: string }) {
           <p className="path small">{PATH}</p>
           {linked ? (
             <div className="row linked">
-              <span className="muted small">Remembered: <b>{linked.handle.name}</b>{linked.imported ? `, last brought in ${ago(linked.imported)}` : ''}. It's read again each time you open this page.</span>
-              {needsClick && <button className="button" onClick={() => void readLinked(link.current!, true)}>Read my saved file</button>}
-              <button className="button ghost" onClick={() => { setNeedsClick(false); setLink(null); void forget(memberId) }}>Forget it</button>
+              <span className="muted small">Remembered: <b>{linked.handle.name}</b>{linked.imported ? `, last brought in ${ago(linked.imported)}` : ''}. Your characters update from it whenever you open the site.</span>
+              <button className="button ghost" onClick={() => { setLink(null); void forget(memberId) }}>Forget it</button>
             </div>
           ) : (
             <div className="row">
@@ -158,7 +134,7 @@ export function AddonImport({ memberId }: { memberId: string }) {
           )}
           {canRemember() && !linked && (
             <p className="muted small">
-              "Choose and remember it" keeps the file in this browser, so this page brings your characters up to date each time you visit.
+              "Choose and remember it" keeps the file in this browser, so your characters come up to date whenever you open any page of the site.
               In the file window, paste the path above (with your account folder) into the File name box. When the browser asks, pick "Allow on every visit".
             </p>
           )}

@@ -36,7 +36,11 @@ async function tx<T>(mode: IDBTransactionMode, run: (s: IDBObjectStore) => IDBRe
   } finally { db.close() }
 }
 
-export interface Remembered { handle: ReadHandle; imported: number } // imported: the file's lastModified at the last import
+export interface Remembered {
+  handle: ReadHandle
+  imported: number // the file's lastModified at the last import
+  skipped?: string[] // new characters the member said not to add
+}
 
 export async function recall(memberId: string): Promise<Remembered | null> {
   try { return (await tx<Remembered | undefined>('readonly', (s) => s.get(memberId))) ?? null } catch { return null }

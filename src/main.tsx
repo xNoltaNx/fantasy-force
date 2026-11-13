@@ -13,6 +13,7 @@ import { Bank } from './pages/Bank'
 import { Links } from './pages/Links'
 import { Raids } from './pages/Raids'
 import { Roster } from './pages/Roster'
+import { SavedFileSync } from './SavedFileSync'
 import { demo, store } from './store'
 import '@fontsource/fredoka/500.css'
 import '@fontsource/fredoka/600.css'
@@ -79,6 +80,7 @@ function Shell() {
           </a>
         ))}
       </nav>
+      <SavedFileSync page={`${page}/${arg ?? ''}`} />
       {/* any click or typing may reveal new item links (an opened list, a search); have Wowhead look again */}
       <main onClick={() => setClicks((n) => n + 1)} onInput={() => setClicks((n) => n + 1)}>
         {page === 'roster' && <Roster />}
