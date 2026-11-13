@@ -22,6 +22,7 @@ local floor = math.floor
 local lastRosterRequest = 0
 local lastGuildRecord = 0
 local loggedIn = false
+local loggingOut = false -- PLAYER_LOGOUT: the game may no longer say the guild
 local onDataChanged -- set in the sharing section: what's recorded changed, share it (debounced)
 
 -- Call a function by (possibly nil) reference without ever throwing.
@@ -467,9 +468,19 @@ local function recordCharacter()
 
     rec.professions = readProfessions()
 
+    -- The game can answer no guild while it's still loading, and at logout (when this runs last). A
+    -- blank answer only clears the guild when the game says, outside logout, that there is none.
     local gname, grank = try(GetGuildInfo, "player")
-    rec.guild = str(gname)
-    rec.rank = str(grank)
+    if str(gname) ~= "" then
+      rec.guild = str(gname)
+      rec.rank = str(grank)
+    elseif not loggingOut and try(IsInGuild) == false then
+      rec.guild = ""
+      rec.rank = ""
+    else
+      rec.guild = rec.guild or ""
+      rec.rank = rec.rank or ""
+    end
 
     rec.updated = time()
     -- every character's roles, for the site: its own pick, else its spec's usual job (Sync.rolesFor)
@@ -5938,6 +5949,7 @@ if frame then
       elseif RECIPE_EVENTS[event] then
         if loggedIn then recordRecipes(event) end
       elseif event == "PLAYER_LOGOUT" then
+        loggingOut = true
         recordCharacter()
         recordAltBank(false)
       else
