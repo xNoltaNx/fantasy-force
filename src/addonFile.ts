@@ -22,6 +22,14 @@ export function parseLuaTable(src: string): Lua {
   const str = (): string => {
     const q = src[i++]
     let out = ''
+    // The file arrives already decoded as UTF-8, so its letters (Vel'ári) are kept as they are. Only \ddd escapes
+    // are raw bytes: a run of them is decoded as UTF-8 together (\195\161 is á), else read one byte per letter.
+    let bytes: number[] = []
+    const flush = () => {
+      if (!bytes.length) return
+      try { out += new TextDecoder('utf-8', { fatal: true }).decode(Uint8Array.from(bytes)) } catch { out += String.fromCharCode(...bytes) }
+      bytes = []
+    }
     while (i < src.length && src[i] !== q) {
       let ch = src[i++]!
       if (ch === '\\') {
@@ -29,15 +37,18 @@ export function parseLuaTable(src: string): Lua {
         if (/[0-9]/.test(e)) {
           let digits = e
           while (digits.length < 3 && /[0-9]/.test(src[i]!)) digits += src[i++]
-          ch = String.fromCharCode(Number(digits))
-        } else ch = ({ n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', f: '\f', v: '\v' } as Record<string, string>)[e] ?? e
+          bytes.push(Number(digits) & 0xff)
+          continue
+        }
+        ch = ({ n: '\n', t: '\t', r: '\r', a: '\x07', b: '\b', f: '\f', v: '\v' } as Record<string, string>)[e] ?? e
       }
+      flush()
       out += ch
     }
+    flush()
     if (src[i] !== q) fail('a string never ends')
     i++
-    // Lua strings are bytes; WoW writes UTF-8. Decode them so names like Vel'ári read right.
-    try { return new TextDecoder().decode(Uint8Array.from(out, (c) => c.charCodeAt(0) & 0xff)) } catch { return out }
+    return out
   }
 
   const value = (): Lua => {
@@ -95,8 +106,9 @@ export interface ImportedCharacter {
   level: number | null
   class_id: string
   race: string
-  spec: string
+  spec: string // '' when the game gave none the site knows (no talents yet): the site keeps what it had
   role: Role
+  rolePicked?: boolean // the player picked roles in game: their pick beats the spec's usual role
   professions: { name: string; skill: number; max: number; recipes?: Recipe[] }[]
   inGuild: boolean
   guild: string
@@ -172,7 +184,16 @@ function specFor(cls: string, spec: string): string {
   const specs = CLASSES.find((c) => c.id === cls)?.specs ?? []
   if (/^feral/i.test(spec) && cls === 'druid') return 'Feral (cat)'
   if (/^combat|^outlaw/i.test(spec) && cls === 'rogue') return 'Combat'
-  return specs.find((s) => s.name.toLowerCase() === spec.toLowerCase())?.name ?? specs[0]?.name ?? ''
+  // No talents yet, the addon writes the class name ("Priest"): no spec, rather than the class's first one.
+  return specs.find((s) => s.name.toLowerCase() === spec.toLowerCase())?.name ?? ''
+}
+
+/** The site's one role: the spec's usual role when the player's in-game pick includes it, else the first pick. */
+function roleOf(cls: string, spec: string, c: Record<string, Lua>): { role: Role; rolePicked: boolean } {
+  const usual = roleFor(cls, spec)
+  const picks = c.rolesSet === true ? list(c.roles).filter((r): r is Role => r === 'tank' || r === 'healer' || r === 'dps') : []
+  if (!picks.length) return { role: usual, rolePicked: false }
+  return { role: spec && picks.includes(usual) ? usual : picks[0]!, rolePicked: true }
 }
 
 const num = (v: Lua | undefined): number | null => (typeof v === 'number' && Number.isFinite(v) ? v : null)
@@ -224,7 +245,7 @@ export function readAddonFile(src: string): AddonFile {
       class_id: cls,
       race: c.race ? raceId(text(c.race)) : '',
       spec,
-      role: roleFor(cls, spec),
+      ...roleOf(cls, spec, c),
       professions: withRecipes(
         list(c.professions).map((p) => rec(p)).filter((p) => text(p.name))
           .map((p) => ({ name: text(p.name), skill: num(p.skill) ?? 0, max: num(p.max) ?? 0 })),

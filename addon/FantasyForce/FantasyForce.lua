@@ -157,6 +157,13 @@ end
 
 -- ------------------------------------------------------------ professions --
 
+-- Every profession and its spell (the spell's name is the profession's name in the client's language).
+local PROFESSION_SPELLS = {
+  Alchemy = 2259, Blacksmithing = 2018, Enchanting = 7411, Engineering = 4036, Leatherworking = 2108,
+  Tailoring = 3908, Mining = 2575, Herbalism = 2366, Skinning = 8613,
+  Cooking = 2550, ["First Aid"] = 3273, Fishing = 7620,
+}
+
 local function readProfessions()
   local list, seen = {}, {}
 
@@ -179,24 +186,24 @@ local function readProfessions()
     end
   end
 
-  -- Classic style: walk the skill list, take rows under the profession headers.
+  -- Classic style: walk the skill list and keep the professions. Weapon skills, Defense and languages also reach
+  -- multiples of 75 (level x 5, or 300), so the cap says nothing: a row counts when the game lets it be unlearned
+  -- (the main professions) or when it's a known profession, by its English name or its spell's name in this
+  -- client's language (Cooking, First Aid and Fishing can't be unlearned in some builds).
   if #list == 0 and type(GetNumSkillLines) == "function" and type(GetSkillLineInfo) == "function" then
+    local known = {}
+    for prof, spell in pairs(PROFESSION_SPELLS) do
+      known[prof] = true
+      local localName = try(GetSpellInfo, spell)
+      if type(localName) == "string" and localName ~= "" then known[localName] = true end
+    end
     local n = num(try(GetNumSkillLines), 0)
-    local inProf = false
     for i = 1, n do
       local name, header, _, rank, _, _, maxRank, isAbandonable = try(GetSkillLineInfo, i)
-      if header then
-        -- Headers: "Professions", "Secondary Skills" (localized); skip others (Weapon Skills, Languages...).
-        inProf = false
-      elseif name then
-        -- Heuristic: professions can be abandoned (or have a real rank cap); weapon skills cannot.
-        if isAbandonable or (num(maxRank, 0) > 1 and num(maxRank, 0) >= 75 and num(maxRank, 0) % 75 == 0) then
-          add(name, rank, maxRank)
-        end
+      if not header and type(name) == "string" and (isAbandonable or known[name]) then
+        add(name, rank, maxRank)
       end
     end
-    -- Cooking/Fishing/First Aid cannot be abandoned in some builds; the multiple-of-75 cap catches them.
-    local _ = inProf
   end
 
   -- Newer professions API variant (secondary skills may be missing above).

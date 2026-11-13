@@ -67,6 +67,24 @@ describe('parseLuaTable', () => {
   it('refuses code, not just data', () => {
     expect(() => parseLuaTable('{ a = os.exit() }')).toThrow()
   })
+
+  it('keeps letters already read as UTF-8, and decodes \\ddd byte escapes as UTF-8', () => {
+    expect(parseLuaTable('{ "Vel\'ári", "Вася", "Vel\\195\\161ri", "a\\065b" }')).toEqual(["Vel'ári", 'Вася', 'Velári', 'aAb'])
+  })
+})
+
+describe('readAddonFile: specs and roles', () => {
+  const file = (char: string) => readAddonFile(`FantasyForceDB = { characters = { ["X Y"] = { name = "X Y", class = "PRIEST", ${char} } } }`).characters[0]!
+
+  it('gives no spec, not the class\'s first, when the game wrote the class name (no talents yet)', () => {
+    expect(file('spec = "Priest"')).toMatchObject({ spec: '', role: 'dps', rolePicked: false })
+  })
+
+  it('takes the roles picked in game: the spec\'s own when it\'s among them, else the first pick', () => {
+    expect(file('spec = "Shadow", roles = { "healer", "dps" }, rolesSet = true')).toMatchObject({ spec: 'Shadow', role: 'dps', rolePicked: true })
+    expect(file('spec = "Shadow", roles = { "healer" }, rolesSet = true')).toMatchObject({ role: 'healer', rolePicked: true })
+    expect(file('spec = "Shadow", roles = { "healer" }')).toMatchObject({ role: 'dps', rolePicked: false })
+  })
 })
 
 const BANK_AND_RAIDS = `FantasyForceDB = {

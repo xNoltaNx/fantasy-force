@@ -41,6 +41,15 @@ describe('mergeImport', () => {
     expect(row!.professions).toHaveLength(1)
   })
 
+  it('keeps the site\'s spec and role when the game has no spec yet, unless roles were picked in game', () => {
+    const [kept] = mergeImport([existing({})], 'm1', [imported({ spec: '', role: 'dps' })])
+    expect(kept).toMatchObject({ spec: 'Protection', role: 'tank' })
+    const [picked] = mergeImport([existing({})], 'm1', [imported({ spec: '', role: 'dps', rolePicked: true })])
+    expect(picked).toMatchObject({ spec: 'Protection', role: 'dps' })
+    const [fresh] = mergeImport([], 'm1', [imported({ class_id: 'priest', spec: '', role: 'dps' })])
+    expect(fresh).toMatchObject({ spec: 'Discipline', role: 'dps' })
+  })
+
   it('keeps a bear or cat pick made on the site, since the game only says Feral', () => {
     const [row] = mergeImport([existing({ class_id: 'druid', spec: 'Feral (bear)', role: 'tank' })], 'm1',
       [imported({ class_id: 'druid', spec: 'Feral (cat)', role: 'dps' })])

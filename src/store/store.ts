@@ -1,4 +1,5 @@
 import type { ImportedCharacter } from '../addonFile'
+import { classById } from '../wow'
 import type { Character, Guild, GuildBank, GuildData, GuildEvent, InGameRoster, Member, Raid, Rank, Signup, Viewer } from '../types'
 
 const union = (a: string[], b: string[]) => [...new Set([...a, ...b])]
@@ -39,8 +40,9 @@ export function mergeImport(existing: Character[], memberId: string, chars: Impo
       name: c.name,
       race: c.race || old?.race || '',
       class_id: c.class_id,
-      spec: keep ? old!.spec : c.spec,
-      role: keep ? old!.role : c.role,
+      // No spec in the file (no talents yet): the site's stays, or the class's first for a new character.
+      spec: keep ? old!.spec : c.spec || old?.spec || classById(c.class_id)?.specs[0]?.name || '',
+      role: keep ? old!.role : c.spec || c.rolePicked || !old ? c.role : old.role,
       is_main: chosen ? c === chosen : old ? old.is_main : !hasMain && i === highest,
       level: c.level,
       // Recipes only refresh when a profession window is opened in game: keep the site's when the file has none.
