@@ -203,7 +203,11 @@ function withRecipes(profs: ImportedCharacter['professions'], recipes: Record<st
 }
 
 export function readAddonFile(src: string): AddonFile {
-  const m = /FantasyForceDB\s*=/.exec(src)
+  // The addon's own code is also called FantasyForce.lua (in Interface\AddOns): easy to pick by mistake.
+  if (/\bCreateFrame\b|^\s*local\s+function\b/m.test(src)) {
+    throw new Error("That's the addon's code (Interface\\AddOns\\FantasyForce), not its saved file. Choose FantasyForce.lua in WTF\\Account\\<your account>\\SavedVariables instead.")
+  }
+  const m = /^\s*FantasyForceDB\s*=/m.exec(src)
   if (!m) throw new Error("This isn't the Fantasy Force addon's file. Look for FantasyForce.lua in WTF\\Account\\<your account>\\SavedVariables.")
   const db = rec(parseLuaTable(src.slice(m.index + m[0].length)))
   const mains = rec(db.mains) // /ff main: { [guild] = character name }
