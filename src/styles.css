@@ -102,8 +102,9 @@ h3 { font-size: 1rem; margin: 0.8rem 0 0.3rem; }
 .brand h1 { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); } /* the logo says the name */
 .tagline { margin: 0.7rem 0 0; color: var(--muted); max-width: 40rem; }
 .who { position: absolute; right: 1rem; top: 1rem; display: flex; gap: 0.5rem; align-items: center; white-space: nowrap; }
-.tabs { max-width: 1100px; margin: 0.9rem auto 1.4rem; padding: 0 1rem; display: flex; gap: 0.4rem; justify-content: center; flex-wrap: wrap; }
-.tabs a { padding: 0.45rem 1rem; color: var(--text); text-decoration: none; border-radius: 999px; font-family: var(--display); font-weight: 500; font-size: 1.05rem; }
+/* One row: snug enough for every tab on a laptop; narrower than that it scrolls sideways (phones wrap, below). */
+.tabs { max-width: 1240px; margin: 0.9rem auto 1.4rem; padding: 0 1rem 2px; display: flex; gap: 0.15rem; justify-content: safe center; flex-wrap: nowrap; overflow-x: auto; scrollbar-width: thin; }
+.tabs a { padding: 0.45rem 0.8rem; color: var(--text); text-decoration: none; border-radius: 999px; font-family: var(--display); font-weight: 500; font-size: 1.05rem; white-space: nowrap; flex: none; }
 .tabs a:hover { background: var(--panel-2); }
 .tabs a.on { background: var(--accent); color: var(--on-accent); }
 .count { display: inline-block; margin-left: 0.4rem; min-width: 1.3rem; padding: 0 0.35rem; border-radius: 1rem; background: var(--gold); color: var(--text); font-size: 0.75rem; text-align: center; font-weight: 800; }
@@ -319,6 +320,7 @@ section > .prof-card { margin-bottom: 1rem; }
   .recipe-list { columns: 1; }
   .logo { width: 150px; height: 150px; }
   .who { position: static; margin-top: 0.6rem; }
+  .tabs { flex-wrap: wrap; justify-content: center; gap: 0.3rem; }
   .tabs a { padding: 0.35rem 0.75rem; font-size: 0.98rem; }
   .member-head { grid-template-columns: 38px 1fr; background: linear-gradient(90deg, color-mix(in srgb, var(--cls) var(--tint, 16%), var(--tint-base)) 0%, var(--tint-base) 70%); }
   .member-main, .member-alts, .member-time { grid-column: 2; }
