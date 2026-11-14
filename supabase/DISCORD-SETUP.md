@@ -1,6 +1,6 @@
 # Discord bot: setup checklist
 
-Once this is done, every event posted on the site shows up in your Discord channel with **Tank**, **Healer**, **DPS** and **Can't make it** buttons, its sign-up counts stay up to date, and an hour before it starts the bot replies with a reminder that pings everyone going. It's free: no server, just Supabase and GitHub.
+Once this is done, every event posted on the site shows up in your Discord channel with **Tank**, **Healer**, **DPS** and **Can't make it** buttons, its sign-ups (who's going, by role) stay up to date, and an hour before it starts the bot replies with a reminder that pings everyone going. Every kill-on-sight mark made on the site's **Kill on sight** page is broadcast too, with a skull on it. It's free: no server, just Supabase and GitHub.
 
 It uses the Discord app you already made for "Sign in with Discord", so there's one app for both.
 
@@ -22,6 +22,10 @@ It uses the Discord app you already made for "Sign in with Discord", so there's 
    - `DISCORD_PUBLIC_KEY`: the Public Key from step 2
    - `DISCORD_APPLICATION_ID`: the Application ID from step 2
    - `DISCORD_CHANNEL_ID`: the channel id from step 4
+
+   Two more, only if you want them:
+   - `DISCORD_KOS_CHANNEL_ID`: a channel of its own for kill-on-sight posts (its id, copied as in step 4; add the bot to it if it's private). Without it they go in the events' channel.
+   - `DISCORD_KOS_ROLE_ID`: a role pinged once by each new kill-on-sight mark, say `@PvP` (**Server Settings** > **Roles**, right-click the role > **Copy Role ID**). Turn on **Allow anyone to @mention this role** in the role's settings, or the ping shows but notifies nobody.
 7. **Deploy it.** In the GitHub repo, open the **Actions** tab, pick **Deploy the Discord bot** on the left, press **Run workflow**, then the green **Run workflow**. Wait for the green tick (a couple of minutes).
 8. **Connect the buttons.** Back in the Developer Portal's **General Information** page, paste this into **Interactions Endpoint URL** and press **Save Changes**:
    `https://nwxgcmcgmsvbnvolthrd.supabase.co/functions/v1/discord-interactions`
@@ -36,4 +40,7 @@ It uses the Discord app you already made for "Sign in with Discord", so there's 
 - A button signs people up with a character that plays that role (their main first), else their main.
 - Change how long before the start the reminder goes out (in minutes) with this in the **SQL Editor**: `update public.discord_state set reminder_minutes = 30;`
 - Switch the bot off with: `update public.discord_state set functions_url = null;` (paste `discord-bot.sql` again to switch it back on).
+- Kill-on-sight posts follow their mark: a change on the site edits the post, **Clear** greys it out and strikes the name through, **Delete** removes it. Deleted in Discord by hand, the post comes back on the mark's next change.
+- The post pictures (the skull, the guild logo) come from the site, `public/discord/`, so they show once the site with them is deployed. `node tools/make-kos-icon.mjs` redraws the skull.
+- Updating an existing bot: paste `discord-bot.sql` again (it adds the kill-on-sight list and brings the event posts already up to the current look), and let the workflow deploy the functions.
 - If posts stop appearing: Supabase **Edge Functions** > **discord-announce** > **Logs** says why (most often a missing secret, or the bot can't see the channel).

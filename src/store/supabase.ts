@@ -1,5 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
-import type { Availability, Character, Guild, GuildBank, GuildData, GuildEvent, InGameRoster, Member, OfficerNote, Raid, Rank, Signup, Viewer } from '../types'
+import type { Availability, Character, Guild, GuildBank, GuildData, GuildEvent, InGameRoster, KosMark, Member, OfficerNote, Raid, Rank, Signup, Viewer } from '../types'
 import { mergeImport, mergeRaid, viewerFrom, type Store } from './store'
 
 // The live site: Supabase holds the data, Discord signs people in, and the row rules in
@@ -52,13 +52,18 @@ export class SupabaseStore implements Store {
 
   async load(): Promise<GuildData> {
     const t = <R,>(name: string) => this.rows<R>(this.db.from(name).select('*'))
-    const [guilds, ranks, members, characters, availability, events, signups, officerNotes, inGame, bank, raids] = await Promise.all([
+    // The kill-on-sight list arrived later (supabase/discord-bot.sql adds it): the site works without it.
+    const kosList = this.rows<KosMark>(this.db.from('kos').select('*').order('created_at', { ascending: false })).catch((e: Error) => {
+      console.warn('Kill on sight list unavailable (run supabase/discord-bot.sql):', e.message)
+      return [] as KosMark[]
+    })
+    const [guilds, ranks, members, characters, availability, events, signups, officerNotes, inGame, bank, raids, kos] = await Promise.all([
       t<Guild>('guild'), t<Rank>('ranks'), t<Member>('members'), t<Character>('characters'), t<Availability>('availability'),
       t<GuildEvent>('events'), t<Signup>('signups'), t<OfficerNote>('officer_notes'), t<InGameRoster>('ingame_roster'),
-      t<GuildBank>('guild_bank'), t<Raid>('raids'),
+      t<GuildBank>('guild_bank'), t<Raid>('raids'), kosList,
     ])
     if (!guilds[0]) throw new Error('The guild table is empty: run supabase/schema.sql in your Supabase project.')
-    return { guild: guilds[0], ranks, members, characters, availability, events, signups, officerNotes, inGame: inGame[0] ?? null, bank: bank[0] ?? null, raids }
+    return { guild: guilds[0], ranks, members, characters, availability, events, signups, officerNotes, inGame: inGame[0] ?? null, bank: bank[0] ?? null, raids, kos }
   }
 
   async updateMember(memberId: string, patch: object) {
@@ -132,6 +137,27 @@ export class SupabaseStore implements Store {
       return old ? mergeRaid(old, r) : r
     })
     await this.ok(this.db.from('raids').upsert(rows))
+  }
+
+  async saveKos(k: Parameters<Store['saveKos']>[0]) {
+    const { id, ...row } = k
+    try {
+      if (id) await this.ok(this.db.from('kos').update(row).eq('id', id))
+      else await this.ok(this.db.from('kos').insert(row))
+    } catch (e) {
+      // kos_one_active_mark: one active mark per name
+      if (e instanceof Error && /kos_one_active_mark/.test(e.message)) throw new Error(`${row.name.trim()} is already kill on sight.`)
+      throw e
+    }
+  }
+
+  async clearKos(id: string) {
+    // The database stamps who cleared it and when (public.kos_stamp).
+    await this.ok(this.db.from('kos').update({ cleared_at: new Date().toISOString() }).eq('id', id))
+  }
+
+  async deleteKos(id: string) {
+    await this.ok(this.db.from('kos').delete().eq('id', id))
   }
 
   async saveOfficerNote(memberId: string, note: string) {

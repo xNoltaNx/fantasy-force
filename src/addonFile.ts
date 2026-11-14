@@ -127,11 +127,24 @@ export interface ImportedGuildMember {
   last_online_days: number | null
 }
 
+/** A kill-on-sight mark the addon has (FantasyForceDB.kos): made in game, by this player or a guildmate. */
+export interface ImportedKos {
+  name: string
+  level: number | null
+  race: string // the site's race id, '' unknown
+  class_id: string
+  guild: string
+  reason: string
+  by: string // who marked them
+  added: number // unix seconds
+}
+
 export interface AddonFile {
   characters: ImportedCharacter[]
   guild: { name: string; updated: number; by: string; members: ImportedGuildMember[] } | null
   bank: GuildBank | null
   raids: Raid[]
+  kos: ImportedKos[] // active marks, newest first
 }
 
 const iso = (secs: number | null): string => new Date((secs ?? 0) * 1000).toISOString()
@@ -278,5 +291,15 @@ export function readAddonFile(src: string): AddonFile {
 
   const bank = db.bank ? readBank(rec(db.bank)) : null
   const raids = list(db.raids).map((r) => readRaid(rec(r))).filter((r) => r.zone)
-  return { characters, guild, bank, raids }
+  const kos = list(db.kos).map((k) => rec(k)).filter((k) => text(k.state) === 'kos' && text(k.name)).map((k) => ({
+    name: text(k.name),
+    level: num(k.level),
+    race: k.race ? raceId(text(k.race)) : '',
+    class_id: classId(text(k.class)),
+    guild: text(k.guild),
+    reason: text(k.reason),
+    by: text(k.by),
+    added: num(k.added) ?? num(k.updated) ?? 0,
+  })).sort((a, b) => b.added - a.added)
+  return { characters, guild, bank, raids, kos }
 }

@@ -10,6 +10,7 @@ import { MyCharacters } from './pages/MyCharacters'
 import { Officers } from './pages/Officers'
 import { Professions } from './pages/Professions'
 import { Bank } from './pages/Bank'
+import { Kos } from './pages/Kos'
 import { Links } from './pages/Links'
 import { Raids } from './pages/Raids'
 import { Roster } from './pages/Roster'
@@ -22,6 +23,7 @@ import '@fontsource/nunito/600.css'
 import '@fontsource/nunito/700.css'
 import '@fontsource/nunito/800.css'
 import './styles.css'
+import './kos.css'
 import { applyTheme, ThemeButton } from './theme'
 
 applyTheme()
@@ -33,6 +35,7 @@ const PAGES: { id: string; name: string; signedIn?: boolean; member?: boolean; o
   { id: 'roster', name: 'Roster' },
   { id: 'events', name: 'Events' },
   { id: 'raids', name: 'Raids', member: true },
+  { id: 'kos', name: 'Kill on sight', member: true },
   { id: 'availability', name: 'Availability' },
   { id: 'professions', name: 'Professions' },
   { id: 'bank', name: 'Guild bank', member: true },
@@ -89,6 +92,7 @@ function Shell() {
         {page === 'balance' && <Balance />}
         {page === 'professions' && <Professions pick={arg} />}
         {page === 'raids' && <Raids />}
+        {page === 'kos' && <Kos pick={arg} />}
         {page === 'bank' && <Bank />}
         {page === 'links' && <Links />}
         {page === 'me' && <MyCharacters key={arg ?? 'me'} memberId={arg} />}

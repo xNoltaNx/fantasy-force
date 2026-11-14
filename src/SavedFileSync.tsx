@@ -12,6 +12,9 @@ const ago = (ms: number) => {
   return h < 48 ? `${h} h ago` : `${Math.round(h / 24)} days ago`
 }
 
+/** Sent each time the remembered saved file could be read (say, just after "Allow"). */
+export const SAVED_FILE_READABLE = 'ff-saved-file-readable'
+
 /** On every page: when this browser remembers the signed-in member's saved file (My characters, "Choose and
  *  remember it"), read it again on opening the site, on each page change and on coming back to the tab. The
  *  member's characters already on the site update by themselves; new ones in the file wait for one click. */
@@ -33,6 +36,7 @@ export function SavedFileSync({ page }: { page: string }) {
       if (!r) { setNeedsClick(false); setAdded([]); return }
       if (!(await allowed(r.handle, ask))) { setNeedsClick(true); return }
       setNeedsClick(false)
+      window.dispatchEvent(new Event(SAVED_FILE_READABLE)) // the KOS page reads its marks from it too
       const f = await r.handle.getFile()
       const fresh = f.lastModified > r.imported // characters are only re-imported when the game saved since
       const parsed = readAddonFile(await f.text())

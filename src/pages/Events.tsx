@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
+import { eventMessage, type EventView } from '../../supabase/functions/_shared/message'
 import { useApp } from '../app'
-import { CharLine, charsOf, memberName, RoleIcon } from '../bits'
+import { CharLine, charsOf, DiscordMark, memberName, RoleIcon } from '../bits'
+import { DiscordMessage, previewSite } from '../discordPreview'
 import { store } from '../store'
 import type { GuildEvent, Signup, SignupStatus } from '../types'
 import { ROLES, type Role } from '../wow'
@@ -145,25 +147,13 @@ function MySignup({ e, memberId, current }: { e: GuildEvent; memberId: string; c
   )
 }
 
-/** Whether the event is up in the guild's Discord channel: the Discord logo, lit or faded, named on hover. */
-function DiscordMark({ posted }: { posted: boolean }) {
-  const label = posted ? 'Posted in Discord' : 'Not in Discord yet'
-  return (
-    <span className={`discord-mark ${posted ? 'on' : ''}`} title={label} role="img" aria-label={label}>
-      <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" fill="currentColor">
-        <path d="M20.317 4.37a19.791 19.791 0 0 0-4.885-1.515.074.074 0 0 0-.079.037c-.21.375-.444.864-.608 1.25a18.27 18.27 0 0 0-5.487 0 12.64 12.64 0 0 0-.617-1.25.077.077 0 0 0-.079-.037A19.736 19.736 0 0 0 3.677 4.37a.07.07 0 0 0-.032.027C.533 9.046-.32 13.58.099 18.057a.082.082 0 0 0 .031.057 19.9 19.9 0 0 0 5.993 3.03.078.078 0 0 0 .084-.028 14.09 14.09 0 0 0 1.226-1.994.076.076 0 0 0-.041-.106 13.107 13.107 0 0 1-1.872-.892.077.077 0 0 1-.008-.128 10.2 10.2 0 0 0 .372-.292.074.074 0 0 1 .077-.01c3.928 1.793 8.18 1.793 12.062 0a.074.074 0 0 1 .078.01c.12.098.246.198.373.292a.077.077 0 0 1-.006.127 12.299 12.299 0 0 1-1.873.892.077.077 0 0 0-.041.107c.36.698.772 1.362 1.225 1.993a.076.076 0 0 0 .084.028 19.839 19.839 0 0 0 6.002-3.03.077.077 0 0 0 .032-.054c.5-5.177-.838-9.674-3.549-13.66a.061.061 0 0 0-.031-.03zM8.02 15.33c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.956-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.956 2.418-2.157 2.418zm7.975 0c-1.183 0-2.157-1.085-2.157-2.419 0-1.333.955-2.419 2.157-2.419 1.21 0 2.176 1.096 2.157 2.42 0 1.333-.946 2.418-2.157 2.418z" />
-      </svg>
-    </span>
-  )
-}
-
 function toLocalInput(iso: string): string {
   const d = new Date(iso)
   return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16)
 }
 
 function EventForm({ event, done }: { event: GuildEvent | null; done: () => void }) {
-  const { act } = useApp()
+  const { data, act } = useApp()
   const tomorrow = new Date(Date.now() + 86400000)
   tomorrow.setHours(19, 0, 0, 0)
   const [f, setF] = useState({
@@ -176,6 +166,18 @@ function EventForm({ event, done }: { event: GuildEvent | null; done: () => void
     need_dps: event?.need_dps ?? 14,
   })
   const num = (k: keyof typeof f) => (e: React.ChangeEvent<HTMLInputElement>) => setF({ ...f, [k]: Number(e.target.value) })
+
+  // The Discord post as the bot will write it, with who's signed up so far.
+  const when = new Date(f.when)
+  const preview: EventView = {
+    id: event?.id ?? '00000000-0000-4000-8000-000000000000', title: f.title.trim() || 'Untitled event',
+    starts_at: (Number.isNaN(when.getTime()) ? new Date() : when).toISOString(), duration_minutes: Math.round(f.hours * 60),
+    description: f.description, need_tank: f.need_tank, need_healer: f.need_healer, need_dps: f.need_dps,
+    discord_message_id: null, guild_name: data.guild.name,
+    signups: data.signups.filter((s) => s.event_id === event?.id).map((s) => ({
+      role: s.role, status: s.status, name: data.characters.find((c) => c.id === s.character_id)?.name ?? memberName(data, s.member_id),
+    })),
+  }
 
   const save = async () => {
     const ok = await act(() => store.saveEvent({
@@ -203,6 +205,10 @@ function EventForm({ event, done }: { event: GuildEvent | null; done: () => void
         <label>DPS needed <input type="number" min={0} value={f.need_dps} onChange={num('need_dps')} /></label>
       </div>
       <label>Details <textarea rows={3} value={f.description} onChange={(e) => setF({ ...f, description: e.target.value })} /></label>
+      <details className="dc-details">
+        <summary>How the post looks in Discord</summary>
+        <DiscordMessage msg={eventMessage(preview, previewSite(), Date.now())} botName={data.guild.name} avatar={`${import.meta.env.BASE_URL}discord/logo.jpg`} />
+      </details>
       <div className="row">
         <button className="button" onClick={save}>{event ? 'Save' : 'Post event'}</button>
         <button className="button ghost" onClick={done}>Cancel</button>

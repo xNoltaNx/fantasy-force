@@ -1,10 +1,11 @@
 // discord-announce: the guild's own database calls it (a trigger through pg_net, and the reminder cron job)
-// whenever an event or its sign-ups change. It keeps one Discord post per event in step with the site.
+// whenever an event or its sign-ups change, or a kill-on-sight mark is made, changed or cleared. It keeps one
+// Discord post per event, and one per mark, in step with the site.
 //
 // Bursts are coalesced in the database (public.discord_claim_sync): at most one post or edit per event every
 // few seconds; a change inside that gap makes one caller wait and then edit with everything, the rest skip.
 
-import { eventMessage, isOver, reminderMessage, type EventView, type ReminderView } from './message.ts'
+import { eventMessage, isOver, kosMessage, reminderMessage, type EventView, type KosView, type ReminderView } from './message.ts'
 import { DiscordError, type Db, type Discord } from './rest.ts'
 
 export type AnnounceBody =
@@ -12,11 +13,17 @@ export type AnnounceBody =
   | { kind: 'counts'; event_id: string } // a sign-up changed: edit the post's counts
   | { kind: 'delete'; message_id: string } // deleted on the site
   | { kind: 'reminders' } // the cron job saw an event starting soon
+  | { kind: 'kos'; kos_id: string } // a kill-on-sight mark made, changed or cleared on the site
+  | { kind: 'kos_delete'; message_id: string } // a mark deleted on the site
 
 export interface AnnounceDeps {
   db: Db
   discord: Discord
   channelId: string
+  /** Where kill-on-sight marks go: their own channel, or the events' one. */
+  kosChannelId: string
+  /** A role pinged once by each new mark (DISCORD_KOS_ROLE_ID), if set. */
+  kosRoleId?: string
   siteUrl: string
   now: () => number
   sleep: (ms: number) => Promise<void>
@@ -34,6 +41,8 @@ export function parseAnnounceBody(x: unknown): AnnounceBody | null {
   if ((b.kind === 'event' || b.kind === 'counts') && str(b.event_id)) return { kind: b.kind, event_id: b.event_id as string }
   if (b.kind === 'delete' && str(b.message_id)) return { kind: 'delete', message_id: b.message_id as string }
   if (b.kind === 'reminders') return { kind: 'reminders' }
+  if (b.kind === 'kos' && str(b.kos_id)) return { kind: 'kos', kos_id: b.kos_id as string }
+  if (b.kind === 'kos_delete' && str(b.message_id)) return { kind: 'kos_delete', message_id: b.message_id as string }
   return null
 }
 
@@ -50,8 +59,10 @@ export async function announceRequest(deps: AnnounceDeps, req: Request): Promise
 }
 
 export async function handleAnnounce(deps: AnnounceDeps, body: AnnounceBody): Promise<void> {
-  if (body.kind === 'delete') return remove(deps, body.message_id)
+  if (body.kind === 'delete') return remove(deps, deps.channelId, body.message_id)
   if (body.kind === 'reminders') return remind(deps)
+  if (body.kind === 'kos') return syncKos(deps, body.kos_id)
+  if (body.kind === 'kos_delete') return remove(deps, deps.kosChannelId, body.message_id)
   return sync(deps, body.event_id, body.kind === 'event')
 }
 
@@ -95,9 +106,9 @@ async function syncNow(deps: AnnounceDeps, eventId: string, mayPost: boolean): P
   await deps.db.rpc('discord_set_message', { p_event: eventId, p_message: sent.id })
 }
 
-async function remove(deps: AnnounceDeps, messageId: string): Promise<void> {
+async function remove(deps: AnnounceDeps, channelId: string, messageId: string): Promise<void> {
   try {
-    await deps.discord.request('DELETE', `/channels/${deps.channelId}/messages/${messageId}`)
+    await deps.discord.request('DELETE', `/channels/${channelId}/messages/${messageId}`)
   } catch (err) {
     if (!gone(err)) throw err
   }
@@ -113,4 +124,39 @@ async function remind(deps: AnnounceDeps): Promise<void> {
       await deps.db.rpc('discord_unclaim_reminder', { p_event: r.id }) // the next tick tries again, until it starts
     }
   }
+}
+
+/**
+ * Make a mark's post match the site. Marks change rarely, so instead of the events' coalescing a post is claimed
+ * (public.discord_claim_kos_post) so two quick changes can't post it twice; the one posting looks again after,
+ * and edits in any change that came while it was posting.
+ */
+async function syncKos(deps: AnnounceDeps, kosId: string): Promise<void> {
+  const view = () => deps.db.rpc<KosView | null>('discord_kos_view', { p_kos: kosId })
+  const k = await view()
+  if (!k) return
+  const path = `/channels/${deps.kosChannelId}/messages`
+  // post: false, so an edit pings nobody
+  const edit = (x: KosView) => deps.discord.request('PATCH', `${path}/${x.discord_message_id}`, kosMessage(x, deps.siteUrl, { roleId: deps.kosRoleId, post: false }))
+  if (k.discord_message_id) {
+    try {
+      await edit(k)
+      return
+    } catch (err) {
+      if (!gone(err)) throw err
+      await deps.db.rpc('discord_set_kos_message', { p_kos: kosId, p_message: null }) // deleted in Discord: post it again
+    }
+  }
+  if (k.cleared_at) return // never posted, and no longer kill on sight: nothing to say
+  if (!(await deps.db.rpc<boolean>('discord_claim_kos_post', { p_kos: kosId }))) return
+  let sent: { id: string }
+  try {
+    sent = await deps.discord.request<{ id: string }>('POST', path, kosMessage(k, deps.siteUrl, { roleId: deps.kosRoleId, post: true }))
+  } catch (err) {
+    await deps.db.rpc('discord_set_kos_message', { p_kos: kosId, p_message: null }) // frees the claim
+    throw err
+  }
+  await deps.db.rpc('discord_set_kos_message', { p_kos: kosId, p_message: sent.id })
+  const now = await view()
+  if (now && now.updated_at !== k.updated_at) await edit({ ...now, discord_message_id: sent.id })
 }

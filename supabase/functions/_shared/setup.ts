@@ -1,5 +1,6 @@
 // Both functions' wiring from the Edge Function's environment (Supabase dashboard: Edge Functions > Secrets).
-// SUPABASE_URL and the service key are there on their own; the DISCORD_* ones the Director adds.
+// SUPABASE_URL and the service key are there on their own; the DISCORD_* ones the Director adds
+// (DISCORD_KOS_CHANNEL_ID and DISCORD_KOS_ROLE_ID only if wanted).
 
 import type { AnnounceDeps } from './announce.ts'
 import type { InteractionDeps } from './interactions.ts'
@@ -23,10 +24,14 @@ function db(env: Env, fetchFn: Fetch) {
 }
 
 export function announceDeps(env: Env, fetchFn: Fetch): AnnounceDeps {
+  const channelId = need(env, 'DISCORD_CHANNEL_ID')
   return {
     db: db(env, fetchFn),
     discord: discordApi(fetchFn, need(env, 'DISCORD_BOT_TOKEN'), sleep),
-    channelId: need(env, 'DISCORD_CHANNEL_ID'),
+    channelId,
+    // Optional: kill-on-sight marks in a channel of their own, and a role (say @PvP) pinged by each new one.
+    kosChannelId: env('DISCORD_KOS_CHANNEL_ID')?.trim() || channelId,
+    kosRoleId: env('DISCORD_KOS_ROLE_ID')?.trim().replace(/\D/g, '') || undefined,
     siteUrl: env('SITE_URL')?.trim() || DEFAULT_SITE_URL,
     now: () => Date.now(),
     sleep,

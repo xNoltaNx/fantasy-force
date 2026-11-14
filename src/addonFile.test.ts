@@ -163,3 +163,24 @@ describe('readAddonFile', () => {
     expect(() => readAddonFile('SomethingElseDB = {}')).toThrow(/FantasyForce\.lua/)
   })
 })
+
+describe('readAddonFile: kill on sight', () => {
+  it('reads the active marks, newest first, with the site\'s race and class ids', () => {
+    const f = readAddonFile(`FantasyForceDB = {
+      ["kos"] = {
+        ["itz shifty"] = { ["name"] = "Itz Shifty", ["state"] = "kos", ["by"] = "Azujin", ["added"] = 1793000000,
+          ["class"] = "DRUID", ["race"] = "Night Elf", ["level"] = 32, ["guild"] = "DYNASTY", ["reason"] = "ganker", ["updated"] = 1793000400 },
+        ["old news"] = { ["name"] = "Old News", ["state"] = "cleared", ["added"] = 1793000500, ["updated"] = 1793000600 },
+        ["bonk"] = { ["name"] = "Bonk", ["state"] = "kos", ["added"] = 1793000900, ["updated"] = 1793000900 },
+      },
+    }`)
+    expect(f.kos).toEqual([
+      { name: 'Bonk', level: null, race: '', class_id: '', guild: '', reason: '', by: '', added: 1793000900 },
+      { name: 'Itz Shifty', level: 32, race: 'nightelf', class_id: 'druid', guild: 'DYNASTY', reason: 'ganker', by: 'Azujin', added: 1793000000 },
+    ])
+  })
+
+  it('has none in a file from before kill on sight', () => {
+    expect(readAddonFile('FantasyForceDB = { ["characters"] = {} }').kos).toEqual([])
+  })
+})

@@ -148,6 +148,25 @@ export interface Raid {
   loot: RaidLoot[]
 }
 
+/** An enemy player on the guild's kill-on-sight list (members only). Each one is broadcast to Discord. */
+export interface KosMark {
+  id: string
+  name: string
+  level: number | null
+  race: string // a race id from wow.ts, '' unknown
+  class_id: string // '' unknown
+  guild: string
+  zone: string // where they were last seen
+  reason: string
+  danger: 1 | 2 | 3 // 1 pest, 2 menace, 3 public enemy
+  created_by: string | null
+  created_at: string
+  updated_at: string
+  cleared_at: string | null // cleared: no longer kill on sight, kept for the record
+  cleared_by: string | null
+  discord_message_id?: string | null // its post in Discord, once the bot has posted it (live site only)
+}
+
 export interface GuildLink {
   title: string
   url: string
@@ -167,6 +186,7 @@ export interface GuildData {
   inGame: InGameRoster | null // the in-game guild list from the addon; members and officers only
   bank: GuildBank | null // members and officers only
   raids: Raid[] // members and officers only
+  kos: KosMark[] // members and officers only, newest first
 }
 
 export interface Viewer {

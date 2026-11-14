@@ -1,6 +1,6 @@
 import type { GuildData, Viewer } from '../types'
 import { seedData } from './seed'
-import { mergeImport, mergeRaid, viewerFrom, type Store } from './store'
+import { activeKos, mergeImport, mergeRaid, viewerFrom, type Store } from './store'
 
 // The demo: an example guild kept in this browser's storage. "Viewing as" picks who you are, so every
 // view (visitor, member, officer, someone waiting for approval) can be tried without Supabase. It hides
@@ -15,7 +15,11 @@ export class DemoStore implements Store {
 
   private read(): GuildData {
     const raw = localStorage.getItem(DATA_KEY)
-    if (raw) return JSON.parse(raw) as GuildData
+    if (raw) {
+      const d = JSON.parse(raw) as GuildData
+      d.kos ??= seedData().kos // a demo saved before the kill-on-sight list
+      return d
+    }
     const fresh = seedData()
     this.write(fresh)
     return fresh
@@ -83,6 +87,7 @@ export class DemoStore implements Store {
       inGame: v?.isApproved ? d.inGame ?? null : null,
       bank: v?.isApproved ? d.bank ?? null : null,
       raids: v?.isApproved ? d.raids ?? [] : [],
+      kos: v?.isApproved ? d.kos : [],
     }
   }
 
@@ -191,6 +196,29 @@ export class DemoStore implements Store {
       }
       d.raids = all
     })
+  }
+
+  async saveKos(k: Parameters<Store['saveKos']>[0]) {
+    this.change((d) => {
+      const name = k.name.trim().replace(/\s+/g, ' ')
+      const same = activeKos(d.kos, name)
+      if (same && same.id !== k.id) throw new Error(`${name} is already kill on sight.`)
+      const now = new Date().toISOString()
+      const old = d.kos.find((x) => x.id === k.id)
+      if (old) Object.assign(old, { ...k, name, id: old.id, updated_at: now })
+      else d.kos.unshift({ ...k, name, id: `k${Date.now()}`, created_by: this.me(), created_at: now, updated_at: now, cleared_at: null, cleared_by: null })
+    })
+  }
+
+  async clearKos(id: string) {
+    this.change((d) => {
+      const k = d.kos.find((x) => x.id === id)
+      if (k && !k.cleared_at) Object.assign(k, { cleared_at: new Date().toISOString(), cleared_by: this.me(), updated_at: new Date().toISOString() })
+    })
+  }
+
+  async deleteKos(id: string) {
+    this.change((d) => (d.kos = d.kos.filter((x) => x.id !== id)))
   }
 
   async saveOfficerNote(memberId: string, note: string) {

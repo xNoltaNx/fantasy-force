@@ -1,6 +1,6 @@
 import type { ImportedCharacter } from '../addonFile'
 import { classById } from '../wow'
-import type { Character, Guild, GuildBank, GuildData, GuildEvent, InGameRoster, Member, Raid, Rank, Signup, Viewer } from '../types'
+import type { Character, Guild, GuildBank, GuildData, GuildEvent, InGameRoster, KosMark, Member, Raid, Rank, Signup, Viewer } from '../types'
 
 const union = (a: string[], b: string[]) => [...new Set([...a, ...b])]
 
@@ -57,6 +57,18 @@ export function mergeImport(existing: Character[], memberId: string, chars: Impo
 
 export type CharacterInput = Omit<Character, 'id'> & { id?: string }
 export type EventInput = Omit<GuildEvent, 'id' | 'created_by'> & { id?: string }
+/** What a member types for a kill-on-sight mark; who and when are the store's. */
+export type KosInput = Pick<KosMark, 'name' | 'level' | 'race' | 'class_id' | 'guild' | 'zone' | 'reason' | 'danger'> & { id?: string }
+
+/** The same name, however it's typed: "itz  shifty" is Itz Shifty. */
+export const kosKey = (name: string) => name.trim().replace(/\s+/g, ' ').toLowerCase()
+
+/** The active mark on that name, if there is one (one per name; cleared ones are history). */
+export function activeKos(marks: KosMark[], name: string): KosMark | undefined {
+  const key = kosKey(name)
+  return marks.find((m) => !m.cleared_at && kosKey(m.name) === key)
+}
+
 export type MemberPatch = Partial<Pick<Member, 'display_name' | 'timezone' | 'about' | 'rank_id' | 'joined_at'>>
 
 /** One data layer, two backends: the demo (this browser's storage) and the live Supabase one. */
@@ -86,6 +98,12 @@ export interface Store {
   saveBank(b: GuildBank): Promise<void>
   /** Add raids from the addon; a night already on the site is joined with the new recording (mergeRaid). */
   importRaids(raids: Raid[]): Promise<void>
+
+  /** Mark an enemy player kill on sight (or change a mark); the live site broadcasts it to Discord. */
+  saveKos(k: KosInput): Promise<void>
+  /** No longer kill on sight: the mark stays, greyed, and so does its Discord post. */
+  clearKos(id: string): Promise<void>
+  deleteKos(id: string): Promise<void>
 
   saveOfficerNote(memberId: string, note: string): Promise<void>
   saveRank(r: Omit<Rank, 'id'> & { id?: number }): Promise<void>

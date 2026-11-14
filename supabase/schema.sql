@@ -279,9 +279,9 @@ create policy "sign up self" on public.signups for all
 
 -- ---------- Discord bot ----------
 -- Each event gets one post in a Discord channel with sign-up buttons, kept up to date, and a reminder
--- reply before it starts. The Edge Functions in supabase/functions talk to Discord; the triggers and the
--- cron job below tell them when, through pg_net. Until discord_state.functions_url is set nothing calls
--- out, and nothing here can stop a save on the site.
+-- reply before it starts. Each kill-on-sight mark made on the site is broadcast too. The Edge Functions in
+-- supabase/functions talk to Discord; the triggers and the cron job below tell them when, through pg_net.
+-- Until discord_state.functions_url is set nothing calls out, and nothing here can stop a save on the site.
 
 create extension if not exists pg_net with schema extensions;
 create extension if not exists pg_cron with schema pg_catalog;
@@ -374,6 +374,92 @@ drop trigger if exists discord_signup_changed on public.signups;
 create trigger discord_signup_changed after insert or update or delete on public.signups
   for each row execute function public.discord_on_signup();
 
+-- ----- Kill on sight -----
+-- The guild's kill-on-sight list on the site (the addon keeps its own in game; each post says how to add the
+-- mark there). Members mark enemy players and anyone in the guild may change or clear a mark, as in the
+-- addon; the marker or an officer may delete one. Each mark is broadcast to Discord and its post follows it.
+
+create table if not exists public.kos (
+  id uuid primary key default gen_random_uuid(),
+  name text not null check (char_length(name) between 2 and 48),
+  level int check (level between 1 and 63),
+  race text not null default '' check (char_length(race) <= 20), -- the site's race id
+  class_id text not null default '' check (char_length(class_id) <= 20),
+  guild text not null default '' check (char_length(guild) <= 48),
+  zone text not null default '' check (char_length(zone) <= 80), -- where they were last seen
+  reason text not null default '' check (char_length(reason) <= 500),
+  danger int not null default 2 check (danger between 1 and 3), -- 1 pest, 2 menace, 3 public enemy
+  created_by uuid default auth.uid() references public.members on delete set null,
+  created_at timestamptz not null default now(),
+  updated_at timestamptz not null default now(), -- what the post shows last changed
+  cleared_at timestamptz,
+  cleared_by uuid references public.members on delete set null,
+  discord_message_id text, -- its post
+  discord_posting_at timestamptz -- a post on its way (discord_claim_kos_post)
+);
+create unique index if not exists kos_one_active_mark on public.kos (lower(name)) where cleared_at is null;
+
+alter table public.kos enable row level security;
+drop policy if exists "members read kos" on public.kos;
+create policy "members read kos" on public.kos for select using (public.is_approved(auth.uid()));
+drop policy if exists "members mark kos" on public.kos;
+create policy "members mark kos" on public.kos for insert with check (public.is_approved(auth.uid()) and created_by = auth.uid());
+drop policy if exists "members change kos" on public.kos;
+create policy "members change kos" on public.kos for update using (public.is_approved(auth.uid())) with check (public.is_approved(auth.uid()));
+drop policy if exists "marker or officer deletes kos" on public.kos;
+create policy "marker or officer deletes kos" on public.kos for delete using (created_by = auth.uid() or public.is_officer());
+-- The site writes only what a person types; who, when and the Discord columns are the database's.
+revoke insert, update on public.kos from anon, authenticated;
+grant insert (name, level, race, class_id, guild, zone, reason, danger) on public.kos to authenticated;
+grant update (name, level, race, class_id, guild, zone, reason, danger, cleared_at) on public.kos to authenticated;
+
+-- Tidies the name, stamps a clear with who and when (a clear can't be undone: mark them again instead), and
+-- moves updated_at when anything the post shows changes, which is what sends the edit.
+create or replace function public.kos_stamp() returns trigger language plpgsql set search_path = public as $$
+begin
+  new.name := btrim(regexp_replace(new.name, '\s+', ' ', 'g'));
+  if tg_op = 'INSERT' then
+    new.created_at := now(); new.updated_at := now(); new.cleared_at := null; new.cleared_by := null;
+    return new;
+  end if;
+  if old.cleared_at is not null then
+    new.cleared_at := old.cleared_at; new.cleared_by := old.cleared_by;
+  elsif new.cleared_at is not null then
+    new.cleared_at := now(); new.cleared_by := auth.uid();
+  else
+    new.cleared_by := null;
+  end if;
+  if (old.name, old.level, old.race, old.class_id, old.guild, old.zone, old.reason, old.danger, old.cleared_at)
+     is distinct from (new.name, new.level, new.race, new.class_id, new.guild, new.zone, new.reason, new.danger, new.cleared_at) then
+    new.updated_at := now();
+  else
+    new.updated_at := old.updated_at;
+  end if;
+  return new;
+end $$;
+drop trigger if exists kos_stamp on public.kos;
+create trigger kos_stamp before insert or update on public.kos for each row execute function public.kos_stamp();
+
+-- A mark made, changed, cleared or deleted on the site.
+create or replace function public.discord_on_kos() returns trigger
+language plpgsql security definer set search_path = public as $$
+begin
+  if tg_op = 'DELETE' then
+    if old.discord_message_id is not null then
+      perform public.discord_call(jsonb_build_object('kind', 'kos_delete', 'message_id', old.discord_message_id));
+    end if;
+    return old;
+  end if;
+  perform public.discord_call(jsonb_build_object('kind', 'kos', 'kos_id', new.id));
+  return new;
+end $$;
+drop trigger if exists discord_kos_marked_or_deleted on public.kos;
+create trigger discord_kos_marked_or_deleted after insert or delete on public.kos
+  for each row execute function public.discord_on_kos();
+drop trigger if exists discord_kos_changed on public.kos;
+create trigger discord_kos_changed after update on public.kos for each row
+  when (old.updated_at is distinct from new.updated_at) execute function public.discord_on_kos();
+
 -- ----- What the functions call (service key only) -----
 
 create or replace function public.discord_hook_ok(p_secret text) returns boolean
@@ -413,21 +499,57 @@ language sql security definer set search_path = public as $$
   update public.discord_sync set busy_until = null where event_id = p_event
 $$;
 
--- An event as its post shows it.
+-- An event as its post shows it: who's going is listed by character (else the member's name).
 create or replace function public.discord_event_view(p_event uuid) returns jsonb
 language sql stable security definer set search_path = public as $$
   select jsonb_build_object(
     'id', e.id, 'title', e.title, 'starts_at', e.starts_at, 'duration_minutes', e.duration_minutes,
     'description', e.description, 'need_tank', e.need_tank, 'need_healer', e.need_healer, 'need_dps', e.need_dps,
     'discord_message_id', e.discord_message_id,
-    'signups', coalesce((select jsonb_agg(jsonb_build_object('role', s.role, 'status', s.status))
-                         from public.signups s where s.event_id = e.id), '[]'::jsonb))
+    'guild_name', (select g.name from public.guild g where g.id = 1),
+    'signups', coalesce((select jsonb_agg(jsonb_build_object('role', s.role, 'status', s.status,
+                                                             'name', coalesce(c.name, m.display_name))
+                                          order by c.is_main desc nulls last, coalesce(c.name, m.display_name))
+                         from public.signups s
+                         left join public.characters c on c.id = s.character_id
+                         left join public.members m on m.id = s.member_id
+                         where s.event_id = e.id), '[]'::jsonb))
   from public.events e where e.id = p_event
 $$;
 
 create or replace function public.discord_set_message(p_event uuid, p_message text) returns void
 language sql security definer set search_path = public as $$
   update public.events set discord_message_id = p_message where id = p_event
+$$;
+
+-- A mark as its post shows it. Who marked or cleared it: their main character, else their name.
+create or replace function public.discord_kos_view(p_kos uuid) returns jsonb
+language sql stable security definer set search_path = public as $$
+  select jsonb_build_object(
+    'id', k.id, 'name', k.name, 'level', k.level, 'race', k.race, 'class_id', k.class_id, 'guild', k.guild,
+    'zone', k.zone, 'reason', k.reason, 'danger', k.danger, 'created_at', k.created_at, 'updated_at', k.updated_at,
+    'cleared_at', k.cleared_at, 'discord_message_id', k.discord_message_id,
+    'marked_by', coalesce((select c.name from public.characters c where c.member_id = k.created_by and c.is_main limit 1),
+                          (select m.display_name from public.members m where m.id = k.created_by), ''),
+    'cleared_by', coalesce((select c.name from public.characters c where c.member_id = k.cleared_by and c.is_main limit 1),
+                           (select m.display_name from public.members m where m.id = k.cleared_by)),
+    'guild_name', (select g.name from public.guild g where g.id = 1))
+  from public.kos k where k.id = p_kos
+$$;
+
+-- True for the one caller that may post the mark (no post yet, and none on its way in the last 30 seconds).
+create or replace function public.discord_claim_kos_post(p_kos uuid) returns boolean
+language plpgsql security definer set search_path = public as $$
+begin
+  update public.kos set discord_posting_at = now()
+    where id = p_kos and discord_message_id is null
+      and (discord_posting_at is null or discord_posting_at < now() - interval '30 seconds');
+  return found;
+end $$;
+
+create or replace function public.discord_set_kos_message(p_kos uuid, p_message text) returns void
+language sql security definer set search_path = public as $$
+  update public.kos set discord_message_id = p_message, discord_posting_at = null where id = p_kos
 $$;
 
 -- A button pressed by a Discord user: sign them up with that role (or mark them out), as the site would.
@@ -522,10 +644,12 @@ end $$;
 revoke execute on function public.discord_call(jsonb), public.discord_hook_ok(text), public.discord_claim_sync(uuid, boolean, boolean),
   public.discord_sync_done(uuid), public.discord_event_view(uuid), public.discord_set_message(uuid, text),
   public.discord_button(text, uuid, text), public.discord_reminder_due(public.events), public.discord_claim_reminders(),
-  public.discord_unclaim_reminder(uuid), public.discord_reminder_tick() from public, anon, authenticated;
+  public.discord_unclaim_reminder(uuid), public.discord_reminder_tick(), public.discord_on_kos(), public.discord_kos_view(uuid),
+  public.discord_claim_kos_post(uuid), public.discord_set_kos_message(uuid, text) from public, anon, authenticated;
 grant execute on function public.discord_hook_ok(text), public.discord_claim_sync(uuid, boolean, boolean),
   public.discord_sync_done(uuid), public.discord_event_view(uuid), public.discord_set_message(uuid, text),
-  public.discord_button(text, uuid, text), public.discord_claim_reminders(), public.discord_unclaim_reminder(uuid) to service_role;
+  public.discord_button(text, uuid, text), public.discord_claim_reminders(), public.discord_unclaim_reminder(uuid),
+  public.discord_kos_view(uuid), public.discord_claim_kos_post(uuid), public.discord_set_kos_message(uuid, text) to service_role;
 
 -- Every 5 minutes (Supabase: Integrations > Cron shows it as discord-reminders).
 select cron.schedule('discord-reminders', '*/5 * * * *', 'select public.discord_reminder_tick()');

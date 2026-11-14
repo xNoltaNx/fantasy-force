@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { announceRequest, handleAnnounce, parseAnnounceBody, type AnnounceDeps } from './announce.ts'
-import type { EventView } from './message.ts'
+import type { EventView, KosView } from './message.ts'
 import { DiscordError } from './rest.ts'
 
 const ID = '0b6f8e2c-1d3a-4c5b-9e7f-112233445566'
@@ -32,7 +32,7 @@ function fake(rpcs: Record<string, Rpc>, discordAnswer: (method: string, path: s
         return a as T
       },
     },
-    channelId: 'c1', siteUrl: 'https://site/', now: () => NOW, sleep: async (ms) => void sleeps.push(ms), log: () => {},
+    channelId: 'c1', kosChannelId: 'k1', siteUrl: 'https://site/', now: () => NOW, sleep: async (ms) => void sleeps.push(ms), log: () => {},
   }
   return { deps, log, sleeps }
 }
@@ -139,6 +139,77 @@ describe('delete and reminders', () => {
       'discord POST /channels/c1/messages',
       'db discord_unclaim_reminder {"p_event":"b"}',
     ])
+  })
+})
+
+describe('kill on sight', () => {
+  const KOS = '7c1d2e3f-4a5b-4c6d-8e9f-a0b1c2d3e4f5'
+  const mark = (o: Partial<KosView> = {}): KosView => ({
+    id: KOS, name: 'Itz Shifty', level: 32, race: 'nightelf', class_id: 'druid', guild: '', zone: '', reason: '', danger: 2,
+    created_at: '2026-11-12T20:00:00Z', updated_at: '2026-11-12T20:00:00Z', cleared_at: null, marked_by: 'Azujin', cleared_by: null,
+    discord_message_id: null, ...o,
+  })
+  const posted = (log: string[]) => log.filter((l) => l.startsWith('discord') || l.includes('set_kos') || l.includes('claim_kos'))
+
+  it('posts a new mark in its own channel and remembers the post', async () => {
+    const { deps, log } = fake({ discord_kos_view: () => mark(), discord_claim_kos_post: () => true }, () => ({ id: 'p1' }))
+    await handleAnnounce(deps, { kind: 'kos', kos_id: KOS })
+    expect(posted(log)).toEqual([
+      `db discord_claim_kos_post {"p_kos":"${KOS}"}`,
+      'discord POST /channels/k1/messages',
+      `db discord_set_kos_message {"p_kos":"${KOS}","p_message":"p1"}`,
+    ])
+  })
+
+  it('posts nothing when another call is already posting it', async () => {
+    const { deps, log } = fake({ discord_kos_view: () => mark(), discord_claim_kos_post: () => false })
+    await handleAnnounce(deps, { kind: 'kos', kos_id: KOS })
+    expect(log.some((l) => l.startsWith('discord'))).toBe(false)
+  })
+
+  it('edits in a change made while it was posting', async () => {
+    const views = [mark(), mark({ updated_at: '2026-11-12T20:00:03Z', reason: 'camping the flight master' })]
+    const { deps, log } = fake({ discord_kos_view: () => views.shift(), discord_claim_kos_post: () => true }, () => ({ id: 'p1' }))
+    await handleAnnounce(deps, { kind: 'kos', kos_id: KOS })
+    expect(log.filter((l) => l.startsWith('discord'))).toEqual(['discord POST /channels/k1/messages', 'discord PATCH /channels/k1/messages/p1'])
+  })
+
+  it('edits the post of a changed or cleared mark, and never posts a cleared one', async () => {
+    const edit = fake({ discord_kos_view: () => mark({ discord_message_id: 'p1', cleared_at: '2026-11-13T00:00:00Z' }) })
+    await handleAnnounce(edit.deps, { kind: 'kos', kos_id: KOS })
+    expect(posted(edit.log)).toEqual(['discord PATCH /channels/k1/messages/p1'])
+    const never = fake({ discord_kos_view: () => mark({ cleared_at: '2026-11-13T00:00:00Z' }) })
+    await handleAnnounce(never.deps, { kind: 'kos', kos_id: KOS })
+    expect(posted(never.log)).toEqual([])
+  })
+
+  it('posts again when the post was deleted in Discord', async () => {
+    const { deps, log } = fake(
+      { discord_kos_view: () => mark({ discord_message_id: 'p1' }), discord_claim_kos_post: () => true },
+      (method) => (method === 'PATCH' ? new DiscordError(404, '') : { id: 'p2' }),
+    )
+    await handleAnnounce(deps, { kind: 'kos', kos_id: KOS })
+    expect(posted(log)).toEqual([
+      'discord PATCH /channels/k1/messages/p1',
+      `db discord_set_kos_message {"p_kos":"${KOS}","p_message":null}`,
+      `db discord_claim_kos_post {"p_kos":"${KOS}"}`,
+      'discord POST /channels/k1/messages',
+      `db discord_set_kos_message {"p_kos":"${KOS}","p_message":"p2"}`,
+    ])
+  })
+
+  it('frees the claim when Discord refuses the post', async () => {
+    const { deps, log } = fake({ discord_kos_view: () => mark(), discord_claim_kos_post: () => true }, () => new DiscordError(403, 'Missing Access'))
+    await expect(handleAnnounce(deps, { kind: 'kos', kos_id: KOS })).rejects.toThrow('Discord 403')
+    expect(log.at(-1)).toBe(`db discord_set_kos_message {"p_kos":"${KOS}","p_message":null}`)
+  })
+
+  it('deletes a deleted mark’s post from its channel', async () => {
+    const { deps, log } = fake({})
+    await handleAnnounce(deps, { kind: 'kos_delete', message_id: 'p1' })
+    expect(log).toEqual(['discord DELETE /channels/k1/messages/p1'])
+    expect(parseAnnounceBody({ kind: 'kos', kos_id: KOS })).toEqual({ kind: 'kos', kos_id: KOS })
+    expect(parseAnnounceBody({ kind: 'kos' })).toBeNull()
   })
 })
 

@@ -1,4 +1,4 @@
-import type { Availability, Character, GuildBank, GuildData, GuildEvent, InGameRoster, Member, Raid, Recipe, Signup } from '../types'
+import type { Availability, Character, GuildBank, GuildData, GuildEvent, InGameRoster, KosMark, Member, Raid, Recipe, Signup } from '../types'
 import { roleFor } from '../wow'
 
 // Example guild for the demo: made-up players, mains and alts, availability and two events.
@@ -199,6 +199,22 @@ export function seedData(): GuildData {
     night(5, 10, [], [[16805, 'Felheart Gloves', 0, 8], [16829, 'Cenarion Boots', 2, 4], [17109, 'Choker of Enlightenment', 7, 1], [19147, 'Ring of Spell Power', 8, 9], [16826, 'Nightslayer Gloves', 3, 5]]),
   ]
 
+  const hoursAgo = (h: number) => new Date(Date.now() - h * 3600000).toISOString()
+  const kos: KosMark[] = [
+    { id: 'k1', name: 'Itz Shifty', level: 32, race: 'nightelf', class_id: 'druid', guild: 'DYNASTY', zone: 'The Barrens, Crossroads',
+      reason: 'Ganks lowbies at the Crossroads flight master, then hides in cat form.', danger: 3,
+      created_by: 'm3', created_at: hoursAgo(5), updated_at: hoursAgo(5), cleared_at: null, cleared_by: null },
+    { id: 'k2', name: 'Lord Bonkington', level: 60, race: 'human', class_id: 'warrior', guild: 'Stormwind Bonk Squad', zone: 'Blackrock Mountain',
+      reason: 'Camps the Molten Core entrance on raid nights.', danger: 2,
+      created_by: 'm1', created_at: hoursAgo(50), updated_at: hoursAgo(50), cleared_at: null, cleared_by: null },
+    { id: 'k3', name: 'Sneakypete', level: 41, race: 'gnome', class_id: 'rogue', guild: '', zone: 'Stranglethorn Vale',
+      reason: 'Saps people at the fishing contest.', danger: 1,
+      created_by: 'm5', created_at: hoursAgo(120), updated_at: hoursAgo(120), cleared_at: null, cleared_by: null },
+    { id: 'k4', name: 'Mooncrash', level: 58, race: 'dwarf', class_id: 'paladin', guild: 'Ironforge Irregulars', zone: 'Tarren Mill',
+      reason: 'Corpse camped Mira for an hour.', danger: 2,
+      created_by: 'm2', created_at: hoursAgo(400), updated_at: hoursAgo(30), cleared_at: hoursAgo(30), cleared_by: 'm1' },
+  ]
+
   return {
     guild: {
       name: 'Fantasy Force', region: 'us', ruleset: 'RP-PvP', faction: 'horde', about: 'A relaxed Horde raiding guild on RP-PvP. Raids Tue and Thu, 7 to 10 pm Pacific.',
@@ -226,5 +242,6 @@ export function seedData(): GuildData {
     inGame,
     bank,
     raids,
+    kos,
   }
 }
