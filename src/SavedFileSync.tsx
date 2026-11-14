@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { readAddonFile, type ImportedCharacter } from './addonFile'
+import { kosInput, marksToSend, sentKey } from './kosAuto'
 import { useApp } from './app'
 import { allowed, recall, remember, type Remembered } from './savedFile'
 import { store } from './store'
@@ -21,6 +22,7 @@ export const SAVED_FILE_READABLE = 'ff-saved-file-readable'
 export function SavedFileSync({ page }: { page: string }) {
   const { data, viewer, act } = useApp()
   const memberId = viewer?.member?.id
+  const approved = !!viewer?.isApproved
   const [needsClick, setNeedsClick] = useState(false)
   const [added, setAdded] = useState<ImportedCharacter[]>([])
   const [note, setNote] = useState('')
@@ -49,7 +51,24 @@ export function SavedFileSync({ page }: { page: string }) {
         setNote(`Your characters are up to date from your saved file (saved ${ago(f.lastModified)}).`)
       }
       setAdded(newOnes)
-      if (fresh) await remember(memberId, { ...r, imported: f.lastModified })
+      let rec: Remembered = fresh ? { ...r, imported: f.lastModified } : r
+      // Kill-on-sight marks made in game since this began go out to Discord by themselves (src/kosAuto.ts).
+      if (approved && rec.kosAuto !== false) {
+        if (rec.kosSince == null) rec = { ...rec, kosSince: Math.floor(Date.now() / 1000) }
+        const send = marksToSend(parsed.kos, latest.current.data, memberId, rec.kosSince!, rec.kosSent ?? [])
+        if (send.length) {
+          rec = { ...rec, kosSent: [...(rec.kosSent ?? []), ...send.map(sentKey)].slice(-200) }
+          await remember(memberId, rec) // before sending: another tab reading the file meanwhile skips them
+          const went: string[] = []
+          await run(async () => {
+            for (const k of send) {
+              try { await store.saveKos(kosInput(k)); went.push(k.name) } catch { /* marked on the site already */ }
+            }
+          })
+          if (went.length) setNote(`Sent to Discord from your addon: ${went.join(', ')}.`)
+        }
+      }
+      if (rec !== r) await remember(memberId, rec)
     } catch {
       // moved, renamed or unreadable: My characters says so when it's opened
     } finally {
@@ -58,7 +77,7 @@ export function SavedFileSync({ page }: { page: string }) {
   }
 
   // on opening the site and on each page change
-  useEffect(() => { void check(false) }, [memberId, page]) // eslint-disable-line
+  useEffect(() => { void check(false) }, [memberId, page, approved]) // eslint-disable-line
   // back on this tab, say after logging out of the game
   useEffect(() => {
     const back = () => { if (document.visibilityState === 'visible') void check(false) }

@@ -17,6 +17,9 @@
 
 .kos-addon { border-color: color-mix(in srgb, var(--blood) 35%, var(--line)); }
 .kos-addon h3 { margin-top: 0; }
+.kos-auto { display: flex; align-items: baseline; gap: 0.5rem; margin: 0 0 1rem; cursor: pointer; }
+.kos-addon .kos-auto { margin: 0.2rem 0 0.8rem; }
+.kos-auto input { flex: none; accent-color: var(--blood); }
 .kos-chips { display: flex; flex-wrap: wrap; gap: 0.45rem; }
 .kos-chip { all: unset; cursor: pointer; display: inline-flex; align-items: center; gap: 0.4rem; padding: 0.25rem 0.75rem 0.25rem 0.35rem; border-radius: 999px;
   background: var(--panel-2); border: 1.5px solid var(--line); font-size: 0.9rem; }

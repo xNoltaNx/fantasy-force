@@ -5,7 +5,7 @@ import { useApp } from '../app'
 import { DiscordMark, memberName } from '../bits'
 import { DiscordMessage, previewSite } from '../discordPreview'
 import { SAVED_FILE_READABLE } from '../SavedFileSync'
-import { allowed, recall } from '../savedFile'
+import { allowed, recall, remember } from '../savedFile'
 import { store } from '../store'
 import { activeKos, type KosInput } from '../store/store'
 import type { GuildData, KosMark } from '../types'
@@ -135,12 +135,21 @@ function FromAddon({ onPick }: { onPick: (k: ImportedKos) => void }) {
   const { data, viewer } = useApp()
   const memberId = viewer?.member?.id
   const [marks, setMarks] = useState<ImportedKos[]>([])
+  const [auto, setAuto] = useState<boolean | null>(null) // null: no saved file remembered in this browser
   const read = useCallback(async () => {
     const r = memberId ? await recall(memberId) : null
+    setAuto(r ? r.kosAuto !== false : null)
     // Not allowed yet: the bar at the top (SavedFileSync) asks, and says when it may be read.
     if (!r || !(await allowed(r.handle, false))) return setMarks([])
     try { setMarks(readAddonFile(await (await r.handle.getFile()).text()).kos) } catch { setMarks([]) }
   }, [memberId])
+  const toggle = async (on: boolean) => {
+    const r = memberId ? await recall(memberId) : null
+    if (!r) return
+    // Turned back on, it starts afresh: marks made while it was off stay chips below rather than all going out.
+    await remember(memberId!, { ...r, kosAuto: on, ...(on ? { kosSince: Math.floor(Date.now() / 1000) } : {}) })
+    setAuto(on)
+  }
   useEffect(() => {
     void read()
     const again = () => void read()
@@ -149,11 +158,18 @@ function FromAddon({ onPick }: { onPick: (k: ImportedKos) => void }) {
   }, [read])
 
   const fresh = marks.filter((m) => !activeKos(data.kos, m.name)).slice(0, 12)
-  if (!fresh.length) return null
+  const autoLine = auto !== null && (
+    <label className="kos-auto">
+      <input type="checkbox" checked={auto} onChange={(e) => void toggle(e.target.checked)} />
+      <span>Send marks I make in game to Discord by themselves <span className="muted small">(after a /reload or logging out, while the site is open)</span></span>
+    </label>
+  )
+  if (!fresh.length) return autoLine || null
   return (
     <div className="card kos-addon">
       <h3>Marked in your addon, not broadcast yet</h3>
       <p className="muted small">From your saved file, as the game last wrote it (on logging out or /reload). Pick one to send it to Discord.</p>
+      {autoLine}
       <div className="kos-chips">
         {fresh.map((m) => (
           <button key={m.name} className="kos-chip" onClick={() => onPick(m)} style={{ '--cls': classById(m.class_id)?.color ?? 'var(--muted)' } as React.CSSProperties}>

@@ -40,6 +40,9 @@ export interface Remembered {
   handle: ReadHandle
   imported: number // the file's lastModified at the last import
   skipped?: string[] // new characters the member said not to add
+  kosAuto?: boolean // send kill-on-sight marks made in game to Discord by themselves (on unless turned off)
+  kosSince?: number // unix seconds: only marks made in game after this are sent by themselves
+  kosSent?: string[] // marks already sent (kosAuto.sentKey)
 }
 
 export async function recall(memberId: string): Promise<Remembered | null> {
